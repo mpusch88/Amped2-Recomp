@@ -75,6 +75,7 @@ static const uint32_t k_vsh_spv[] =
 
 #define VKB_MAX_SURFACES    16
 #define VKB_MAX_SWAP_IMAGES 8
+#define VKB_FRAMES          2       /* frames in flight (ensure_recording) */
 #define VKB_MAX_TEXTURES    512
 #define VKB_MAX_BAD_TEXTURES 16
 #define VKB_MAX_SAMPLERS    32
@@ -282,6 +283,22 @@ static struct {
     uint32_t          ov_w, ov_h;          /* overlay canvas: the shown screen's size */
     uint64_t          ov_uploaded;         /* overlay seq in ov_image */
     uint64_t          ov_presented;        /* overlay seq last presented */
+
+    /* Frames in flight: the CPU records the next frame while the GPU still
+     * draws the last one. Each slot has its own command buffer, fence,
+     * acquire semaphore, rings and timestamp pool; cmd, frame_fence,
+     * sem_acquire, vring, staging and perf_qp above are the current slot's,
+     * switched by ensure_recording. Images freed mid-run wait for the device
+     * to go idle first (vkDeviceWaitIdle), so no frame still uses them. */
+    struct {
+        VkCommandBuffer cmd;
+        VkFence         fence;
+        VkSemaphore     acquire;
+        VkbRing         vring, staging;
+        VkQueryPool     perf_qp;
+        int             perf_pending;
+    } slot[VKB_FRAMES];
+    uint32_t          cur;                 /* the current slot */
 } V;
 
 #define VKB_OV_W 640u
@@ -1075,6 +1092,7 @@ static int init_vulkan(void)
     VkFenceCreateInfo fci;
     VkSemaphoreCreateInfo sci;
     const char *e;
+    uint32_t k;
 
     if (volkInitialize() != VK_SUCCESS) {
         fprintf(stderr, "  [VK] no Vulkan loader (libvulkan / vulkan-1.dll)\n");
@@ -1102,11 +1120,13 @@ static int init_vulkan(void)
     }
     if (!pick_gpu() || !create_device() || !create_swapchain() || !create_pipeline())
         return 0;
-    if (!ring_create(&V.vring, VKB_VERTEX_RING,
-                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
-                     | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
-            || !ring_create(&V.staging, VKB_STAGING_RING, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
-        return 0;
+    for (k = 0; k < VKB_FRAMES; k++)
+        if (!ring_create(&V.slot[k].vring, VKB_VERTEX_RING,
+                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+                         | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
+                || !ring_create(&V.slot[k].staging, VKB_STAGING_RING,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
+            return 0;
 
     memset(&pci, 0, sizeof pci);
     pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -1118,11 +1138,16 @@ static int init_vulkan(void)
     ai.commandPool = V.cmd_pool;
     ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
-    VK_CHECK(vkAllocateCommandBuffers(V.device, &ai, &V.cmd));
     memset(&fci, 0, sizeof fci);
     fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    VK_CHECK(vkCreateFence(V.device, &fci, NULL, &V.frame_fence));
+    memset(&sci, 0, sizeof sci);
+    sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    for (k = 0; k < VKB_FRAMES; k++) {
+        VK_CHECK(vkAllocateCommandBuffers(V.device, &ai, &V.slot[k].cmd));
+        VK_CHECK(vkCreateFence(V.device, &fci, NULL, &V.slot[k].fence));
+        VK_CHECK(vkCreateSemaphore(V.device, &sci, NULL, &V.slot[k].acquire));
+    }
     if (getenv("AMPED2_VK_PERF")) {
         VkQueryPoolCreateInfo qci;
         VkPhysicalDeviceProperties p;
@@ -1131,13 +1156,18 @@ static int init_vulkan(void)
         qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
         qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
         qci.queryCount = 2;
-        if (p.limits.timestampComputeAndGraphics
-                && vkCreateQueryPool(V.device, &qci, NULL, &V.perf_qp) == VK_SUCCESS)
-            V.perf_ns_per_tick = p.limits.timestampPeriod;
+        for (k = 0; k < VKB_FRAMES && p.limits.timestampComputeAndGraphics; k++)
+            if (vkCreateQueryPool(V.device, &qci, NULL, &V.slot[k].perf_qp) == VK_SUCCESS)
+                V.perf_ns_per_tick = p.limits.timestampPeriod;
     }
-    memset(&sci, 0, sizeof sci);
-    sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    VK_CHECK(vkCreateSemaphore(V.device, &sci, NULL, &V.sem_acquire));
+    /* Slot 0 is current; ensure_recording moves on to slot 1 first. */
+    V.cur = VKB_FRAMES - 1;
+    V.cmd = V.slot[V.cur].cmd;
+    V.frame_fence = V.slot[V.cur].fence;
+    V.sem_acquire = V.slot[V.cur].acquire;
+    V.vring = V.slot[V.cur].vring;
+    V.staging = V.slot[V.cur].staging;
+    V.perf_qp = V.slot[V.cur].perf_qp;
 
     V.scale = (uint32_t)g_amped2_settings.resolution_scale;
     if (V.scale < 1 || V.scale > AMPED2_SCALE_MAX)
@@ -1174,6 +1204,20 @@ static int ensure_recording(void)
 
     if (V.recording)
         return 1;
+    /* The next slot: its fence is the frame before last, so the GPU may
+     * still be drawing the last frame while this one is recorded. The rings
+     * are copied back since they change (used, a grown buffer). */
+    V.slot[V.cur].vring = V.vring;
+    V.slot[V.cur].staging = V.staging;
+    V.slot[V.cur].perf_pending = V.perf_pending;
+    V.cur = (V.cur + 1) % VKB_FRAMES;
+    V.cmd = V.slot[V.cur].cmd;
+    V.frame_fence = V.slot[V.cur].fence;
+    V.sem_acquire = V.slot[V.cur].acquire;
+    V.vring = V.slot[V.cur].vring;
+    V.staging = V.slot[V.cur].staging;
+    V.perf_qp = V.slot[V.cur].perf_qp;
+    V.perf_pending = V.slot[V.cur].perf_pending;
     if (V.perf_qp) {
         uint64_t t0 = SDL_GetPerformanceCounter(), t1, ts[2];
         double f = 1000.0 / (double)SDL_GetPerformanceFrequency();
