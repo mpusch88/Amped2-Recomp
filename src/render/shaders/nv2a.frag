@@ -181,8 +181,57 @@ vec4 stage_fetch(int st, vec4 c, vec4 t[4])
 
 // ---- register combiners (nv2a_rc_eval) --------------------------------
 
-vec4 R[16];   // 0 zero, 1 c0, 2 c1, 3 fog, 4 v0, 5 v1, 8-11 t0-t3,
-              // 12 r0, 13 r1, 14 v1+r0 sum, 15 E*F product
+// The combiner registers: 0 zero, 1 c0, 2 c1, 3 fog, 4 v0, 5 v1, 8-11
+// t0-t3, 12 r0, 13 r1, 14 v1+r0 sum, 15 E*F product. Plain variables, not
+// an array: the register numbers come from the combiner words, and GPU
+// compilers keep a dynamically indexed array in local memory -- a memory
+// access per read and write, per pixel and stage, most of the frame time at
+// a high resolution scale. The numbers are the same for every pixel of a
+// draw, so the switches below cost next to nothing. Register 0 reads zero
+// (the CPU path clears it after every stage, before anything reads it).
+vec4 R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15;
+
+vec4 reg(uint i)
+{
+    switch (i) {
+    case 1u:  return R1;  case 2u:  return R2;  case 3u:  return R3;
+    case 4u:  return R4;  case 5u:  return R5;  case 6u:  return R6;
+    case 7u:  return R7;  case 8u:  return R8;  case 9u:  return R9;
+    case 10u: return R10; case 11u: return R11; case 12u: return R12;
+    case 13u: return R13; case 14u: return R14; case 15u: return R15;
+    default:  return vec4(0.0);
+    }
+}
+
+void set_rgb(uint i, vec3 v)
+{
+    switch (i) {
+    case 1u:  R1.rgb = v;  break; case 2u:  R2.rgb = v;  break;
+    case 3u:  R3.rgb = v;  break; case 4u:  R4.rgb = v;  break;
+    case 5u:  R5.rgb = v;  break; case 6u:  R6.rgb = v;  break;
+    case 7u:  R7.rgb = v;  break; case 8u:  R8.rgb = v;  break;
+    case 9u:  R9.rgb = v;  break; case 10u: R10.rgb = v; break;
+    case 11u: R11.rgb = v; break; case 12u: R12.rgb = v; break;
+    case 13u: R13.rgb = v; break; case 14u: R14.rgb = v; break;
+    case 15u: R15.rgb = v; break;
+    default:  break;
+    }
+}
+
+void set_a(uint i, float a)
+{
+    switch (i) {
+    case 1u:  R1.a = a;  break; case 2u:  R2.a = a;  break;
+    case 3u:  R3.a = a;  break; case 4u:  R4.a = a;  break;
+    case 5u:  R5.a = a;  break; case 6u:  R6.a = a;  break;
+    case 7u:  R7.a = a;  break; case 8u:  R8.a = a;  break;
+    case 9u:  R9.a = a;  break; case 10u: R10.a = a; break;
+    case 11u: R11.a = a; break; case 12u: R12.a = a; break;
+    case 13u: R13.a = a; break; case 14u: R14.a = a; break;
+    case 15u: R15.a = a; break;
+    default:  break;
+    }
+}
 
 // PS_INPUTMAPPING (psh.c get_input_var).
 float map_in(float x, uint b)
@@ -220,14 +269,14 @@ float map_out1(float x, uint m)
 
 vec3 read_rgb(uint b)
 {
-    vec4 r = R[b & 15u];
+    vec4 r = reg(b & 15u);
     vec3 v = (b & 0x10u) != 0u ? r.aaa : r.rgb;
     return vec3(map_in(v.x, b), map_in(v.y, b), map_in(v.z, b));
 }
 
 float read_alpha(uint b)
 {
-    vec4 r = R[b & 15u];
+    vec4 r = reg(b & 15u);
     return map_in((b & 0x10u) != 0u ? r.a : r.b, b);
 }
 
@@ -235,23 +284,22 @@ vec4 combine(vec4 t[4])
 {
     uint n = min(rc.fin.z & 255u, 8u), flags = rc.fin.z >> 8;
 
-    for (int i = 0; i < 16; i++)
-        R[i] = vec4(0.0);
-    R[3] = vec4(rc.fog_color.rgb, v_fog);
-    R[4] = v_diffuse;
-    R[5] = v_specular;
-    R[8] = t[0]; R[9] = t[1]; R[10] = t[2]; R[11] = t[3];
+    R1 = R2 = R6 = R7 = R12 = R13 = R14 = R15 = vec4(0.0);
+    R3 = vec4(rc.fog_color.rgb, v_fog);
+    R4 = v_diffuse;
+    R5 = v_specular;
+    R8 = t[0]; R9 = t[1]; R10 = t[2]; R11 = t[3];
     // r0.a starts as texture 0's alpha, or 1 with stage 0 off.
-    R[12].a = (rc.fin.w & 31u) != 0u ? t[0].a : 1.0;
+    R12.a = (rc.fin.w & 31u) != 0u ? t[0].a : 1.0;
 
     for (uint s = 0u; s < n; s++) {
         uint icw = rc.cw[s].x, aicw = rc.cw[s].y;
         uint ocw = rc.cw[s].z, aocw = rc.cw[s].w;
         uint fl = ocw >> 12, afl = aocw >> 12;
-        R[1] = rc.c0[s];
-        R[2] = rc.c1[s];
-        bool mux_cd = (flags & 1u) != 0u ? R[12].a >= 0.5
-                                         : (int(R[12].a * 255.0) & 1) != 0;
+        R1 = rc.c0[s];
+        R2 = rc.c1[s];
+        bool mux_cd = (flags & 1u) != 0u ? R12.a >= 0.5
+                                         : (int(R12.a * 255.0) & 1) != 0;
 
         // Both portions read before either writes.
         vec3 A = read_rgb(icw >> 24), B = read_rgb(icw >> 16);
@@ -275,38 +323,37 @@ vec4 combine(vec4 t[4])
         // RGB destinations; blue-to-alpha also writes the destination's .a.
         uint d;
         if ((d = (ocw >> 4) & 15u) != 0u) {
-            R[d].rgb = ab;
-            if ((fl & 0x80u) != 0u) R[d].a = ab.b;
+            set_rgb(d, ab);
+            if ((fl & 0x80u) != 0u) set_a(d, ab.b);
         }
         if ((d = ocw & 15u) != 0u) {
-            R[d].rgb = cd;
-            if ((fl & 0x40u) != 0u) R[d].a = cd.b;
+            set_rgb(d, cd);
+            if ((fl & 0x40u) != 0u) set_a(d, cd.b);
         }
         if ((d = (ocw >> 8) & 15u) != 0u)
-            R[d].rgb = ms;
-        if ((d = (aocw >> 4) & 15u) != 0u) R[d].a = aab;
-        if ((d = aocw & 15u) != 0u)        R[d].a = acd;
-        if ((d = (aocw >> 8) & 15u) != 0u) R[d].a = ams;
-        R[0] = vec4(0.0);
+            set_rgb(d, ms);
+        if ((d = (aocw >> 4) & 15u) != 0u) set_a(d, aab);
+        if ((d = aocw & 15u) != 0u)        set_a(d, acd);
+        if ((d = (aocw >> 8) & 15u) != 0u) set_a(d, ams);
     }
 
     vec4 o;
     if (rc.fin.x != 0u || rc.fin.y != 0u) {
         uint f0 = rc.fin.x, f1 = rc.fin.y, ff = f1 & 255u;
-        R[1] = rc.fc0;
-        R[2] = rc.fc1;
+        R1 = rc.fc0;
+        R2 = rc.fc1;
         // V1R0 sum: optional complements (0x40 v1, 0x20 r0), clamp (0x80).
-        vec3 sa = (ff & 0x40u) != 0u ? 1.0 - R[5].rgb : R[5].rgb;
-        vec3 sb = (ff & 0x20u) != 0u ? 1.0 - R[12].rgb : R[12].rgb;
-        R[14] = vec4((ff & 0x80u) != 0u ? clamp(sa + sb, 0.0, 1.0) : sa + sb, 0.0);
+        vec3 sa = (ff & 0x40u) != 0u ? 1.0 - R5.rgb : R5.rgb;
+        vec3 sb = (ff & 0x20u) != 0u ? 1.0 - R12.rgb : R12.rgb;
+        R14 = vec4((ff & 0x80u) != 0u ? clamp(sa + sb, 0.0, 1.0) : sa + sb, 0.0);
         vec3 E = read_rgb(f1 >> 24), F = read_rgb(f1 >> 16);
-        R[15] = vec4(E * F, 0.0);
+        R15 = vec4(E * F, 0.0);
         vec3 A = read_rgb(f0 >> 24), B = read_rgb(f0 >> 16);
         vec3 C = read_rgb(f0 >> 8),  D = read_rgb(f0);
         o.rgb = D + C * (1.0 - A) + B * A;
         o.a = read_alpha(f1 >> 8);
     } else {
-        o = R[12];
+        o = R12;
     }
     return clamp(o, 0.0, 1.0);
 }
