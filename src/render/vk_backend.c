@@ -207,6 +207,16 @@ static struct {
     VkSemaphore       sem_acquire;
     int               recording;
 
+    /* AMPED2_VK_PERF=1: GPU time per frame (timestamps at the start and end
+     * of its command buffer), the CPU's wait for the GPU before recording the
+     * next one and the frame interval -- the [PERF] line every 5 s. */
+    VkQueryPool       perf_qp;
+    double            perf_ns_per_tick;
+    int               perf_pending;        /* both timestamps of the last frame written */
+    uint64_t          perf_frame_start;    /* SDL performance counter, frame start */
+    double            perf_gpu_ms, perf_wait_ms, perf_frame_ms;
+    uint32_t          perf_frames;
+
     VkbSurface        surfaces[VKB_MAX_SURFACES];
     VkbSurface       *last;                /* last surface cleared/drawn */
     uint32_t          flips;
@@ -1113,6 +1123,18 @@ static int init_vulkan(void)
     fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     VK_CHECK(vkCreateFence(V.device, &fci, NULL, &V.frame_fence));
+    if (getenv("AMPED2_VK_PERF")) {
+        VkQueryPoolCreateInfo qci;
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(V.gpu, &p);
+        memset(&qci, 0, sizeof qci);
+        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qci.queryCount = 2;
+        if (p.limits.timestampComputeAndGraphics
+                && vkCreateQueryPool(V.device, &qci, NULL, &V.perf_qp) == VK_SUCCESS)
+            V.perf_ns_per_tick = p.limits.timestampPeriod;
+    }
     memset(&sci, 0, sizeof sci);
     sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     VK_CHECK(vkCreateSemaphore(V.device, &sci, NULL, &V.sem_acquire));
@@ -1152,6 +1174,22 @@ static int ensure_recording(void)
 
     if (V.recording)
         return 1;
+    if (V.perf_qp) {
+        uint64_t t0 = SDL_GetPerformanceCounter(), t1, ts[2];
+        double f = 1000.0 / (double)SDL_GetPerformanceFrequency();
+        vkWaitForFences(V.device, 1, &V.frame_fence, VK_TRUE, UINT64_MAX);
+        t1 = SDL_GetPerformanceCounter();
+        V.perf_wait_ms += (double)(t1 - t0) * f;
+        if (V.perf_frame_start)
+            V.perf_frame_ms += (double)(t1 - V.perf_frame_start) * f;
+        V.perf_frame_start = t1;
+        if (V.perf_pending && vkGetQueryPoolResults(V.device, V.perf_qp, 0, 2, sizeof ts, ts,
+                sizeof ts[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            V.perf_gpu_ms += (double)(ts[1] - ts[0]) * V.perf_ns_per_tick / 1e6;
+            V.perf_frames++;
+        }
+        V.perf_pending = 0;
+    }
     vkWaitForFences(V.device, 1, &V.frame_fence, VK_TRUE, UINT64_MAX);
     vkResetFences(V.device, 1, &V.frame_fence);
     vkResetCommandBuffer(V.cmd, 0);
@@ -1159,6 +1197,10 @@ static int ensure_recording(void)
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK_CHECK(vkBeginCommandBuffer(V.cmd, &bi));
+    if (V.perf_qp) {
+        vkCmdResetQueryPool(V.cmd, V.perf_qp, 0, 2);
+        vkCmdWriteTimestamp(V.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, V.perf_qp, 0);
+    }
     V.recording = 1;
     V.bound = VK_NULL_HANDLE;
     V.frame_serial++;
@@ -2614,6 +2656,13 @@ static void update_title(void)
                     tb + sizeof "Amped 2 (Recomp, Vulkan) | " - 1, V.stat_decodes,
                     V.stat_new, (double)V.stat_decode_px / 1e6, V.stat_hashes,
                     (double)V.stat_hash_bytes / 1e6);
+            if (V.perf_frames) {
+                double n = (double)V.perf_frames;
+                fprintf(stderr, "  [PERF] gpu %.2f ms/frame | cpu waits for the gpu %.2f ms/frame | "
+                        "frame %.2f ms\n", V.perf_gpu_ms / n, V.perf_wait_ms / n, V.perf_frame_ms / n);
+                V.perf_gpu_ms = V.perf_wait_ms = V.perf_frame_ms = 0.0;
+                V.perf_frames = 0;
+            }
             V.stat_decodes = V.stat_new = V.stat_hashes = 0;
             V.stat_hash_bytes = 0;
             V.stat_decode_px = 0;
@@ -2866,6 +2915,10 @@ static void present(int real_flip)
     overlay_record(img);
     transition(img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (V.perf_qp) {
+        vkCmdWriteTimestamp(V.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, V.perf_qp, 1);
+        V.perf_pending = 1;
+    }
     vkEndCommandBuffer(V.cmd);
     V.recording = 0;
 
