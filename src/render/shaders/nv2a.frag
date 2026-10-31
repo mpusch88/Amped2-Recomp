@@ -52,6 +52,73 @@ layout(push_constant) uniform PC {
 
 layout(location = 0) out vec4 o_color;
 
+// The structural combiner state -- the combiner words, final0/1, control,
+// stage program and misc -- either from the RC block or, in a pipeline made
+// for one combiner program (VkbVariant, vk_backend.c), as specialization
+// constants: the driver then compiles that program alone (loop unrolled,
+// register numbers and modes folded) instead of interpreting it per pixel.
+layout(constant_id = 0) const bool SPEC = false;
+layout(constant_id = 1) const uint SC0x = 0u;
+layout(constant_id = 2) const uint SC0y = 0u;
+layout(constant_id = 3) const uint SC0z = 0u;
+layout(constant_id = 4) const uint SC0w = 0u;
+layout(constant_id = 5) const uint SC1x = 0u;
+layout(constant_id = 6) const uint SC1y = 0u;
+layout(constant_id = 7) const uint SC1z = 0u;
+layout(constant_id = 8) const uint SC1w = 0u;
+layout(constant_id = 9) const uint SC2x = 0u;
+layout(constant_id = 10) const uint SC2y = 0u;
+layout(constant_id = 11) const uint SC2z = 0u;
+layout(constant_id = 12) const uint SC2w = 0u;
+layout(constant_id = 13) const uint SC3x = 0u;
+layout(constant_id = 14) const uint SC3y = 0u;
+layout(constant_id = 15) const uint SC3z = 0u;
+layout(constant_id = 16) const uint SC3w = 0u;
+layout(constant_id = 17) const uint SC4x = 0u;
+layout(constant_id = 18) const uint SC4y = 0u;
+layout(constant_id = 19) const uint SC4z = 0u;
+layout(constant_id = 20) const uint SC4w = 0u;
+layout(constant_id = 21) const uint SC5x = 0u;
+layout(constant_id = 22) const uint SC5y = 0u;
+layout(constant_id = 23) const uint SC5z = 0u;
+layout(constant_id = 24) const uint SC5w = 0u;
+layout(constant_id = 25) const uint SC6x = 0u;
+layout(constant_id = 26) const uint SC6y = 0u;
+layout(constant_id = 27) const uint SC6z = 0u;
+layout(constant_id = 28) const uint SC6w = 0u;
+layout(constant_id = 29) const uint SC7x = 0u;
+layout(constant_id = 30) const uint SC7y = 0u;
+layout(constant_id = 31) const uint SC7z = 0u;
+layout(constant_id = 32) const uint SC7w = 0u;
+layout(constant_id = 33) const uint SFIN_x = 0u;
+layout(constant_id = 34) const uint SFIN_y = 0u;
+layout(constant_id = 35) const uint SFIN_z = 0u;
+layout(constant_id = 36) const uint SFIN_w = 0u;
+layout(constant_id = 37) const uint SMISC_x = 0u;
+layout(constant_id = 38) const uint SMISC_y = 0u;
+layout(constant_id = 39) const uint SMISC_z = 0u;
+layout(constant_id = 40) const uint SMISC_w = 0u;
+
+uvec4 cw_of(uint s)
+{
+    if (SPEC) {
+        switch (s) {
+        case 0u: return uvec4(SC0x, SC0y, SC0z, SC0w);
+        case 1u: return uvec4(SC1x, SC1y, SC1z, SC1w);
+        case 2u: return uvec4(SC2x, SC2y, SC2z, SC2w);
+        case 3u: return uvec4(SC3x, SC3y, SC3z, SC3w);
+        case 4u: return uvec4(SC4x, SC4y, SC4z, SC4w);
+        case 5u: return uvec4(SC5x, SC5y, SC5z, SC5w);
+        case 6u: return uvec4(SC6x, SC6y, SC6z, SC6w);
+        case 7u: return uvec4(SC7x, SC7y, SC7z, SC7w);
+        }
+    }
+    return rc.cw[s];
+}
+
+uvec4 fin_of(void)  { return SPEC ? uvec4(SFIN_x, SFIN_y, SFIN_z, SFIN_w) : rc.fin; }
+uvec4 misc_of(void) { return SPEC ? uvec4(SMISC_x, SMISC_y, SMISC_z, SMISC_w) : rc.misc; }
+
 // NV2A alpha test: GL compare functions 0x200 (NEVER) .. 0x207 (ALWAYS),
 // passed as 0..7, reference 0..255.
 bool alpha_pass(float a)
@@ -88,7 +155,7 @@ vec4 stage_sample(int st, vec2 uv)
 // the GL rules the CPU path implements by hand.
 vec4 stage_cube(int st, vec3 d)
 {
-    if (((rc.misc.w >> st) & 1u) == 0u)
+    if (((misc_of().w >> st) & 1u) == 0u)
         return stage_sample(st, d.xy * rc.tex_scale[st].xy);
     if (d == vec3(0.0))
         d = vec3(1.0, 0.0, 0.0);
@@ -118,9 +185,9 @@ float g_eye_w[4];
 float stage_dot(int st, vec4 c, vec4 t[4])
 {
     uint inp = st == 1 ? 0u
-             : st == 2 ? (rc.misc.z >> 16) & 3u
-                       : (rc.misc.z >> 20) & 3u;
-    uint m = (rc.misc.y >> (4 * (st - 1))) & 15u;
+             : st == 2 ? (misc_of().z >> 16) & 3u
+                       : (misc_of().z >> 20) & 3u;
+    uint m = (misc_of().y >> (4 * (st - 1))) & 15u;
     vec4 x = t[inp];
     return c.x * dotmap(m, x.x) + c.y * dotmap(m, x.y) + c.z * dotmap(m, x.z);
 }
@@ -128,7 +195,7 @@ float stage_dot(int st, vec4 c, vec4 t[4])
 // Texture stage st with coordinates c; t[] holds the stages before it.
 vec4 stage_fetch(int st, vec4 c, vec4 t[4])
 {
-    uint mode = (rc.fin.w >> (st * 5)) & 31u;
+    uint mode = (fin_of().w >> (st * 5)) & 31u;
     float q = c.w != 0.0 ? c.w : 1.0;
     g_eye_w[st] = c.w;
     switch (mode) {
@@ -142,7 +209,7 @@ vec4 stage_fetch(int st, vec4 c, vec4 t[4])
         return clamp(c, 0.0, 1.0);
     case 5u: {                                // CLIPPLANE
         for (int j = 0; j < 4; j++) {
-            bool ge = ((rc.misc.x >> (st * 4 + j)) & 1u) != 0u;
+            bool ge = ((misc_of().x >> (st * 4 + j)) & 1u) != 0u;
             if (ge ? c[j] >= 0.0 : c[j] < 0.0)
                 discard;
         }
@@ -282,7 +349,8 @@ float read_alpha(uint b)
 
 vec4 combine(vec4 t[4])
 {
-    uint n = min(rc.fin.z & 255u, 8u), flags = rc.fin.z >> 8;
+    uvec4 fin = fin_of();
+    uint n = min(fin.z & 255u, 8u), flags = fin.z >> 8;
 
     R1 = R2 = R6 = R7 = R12 = R13 = R14 = R15 = vec4(0.0);
     R3 = vec4(rc.fog_color.rgb, v_fog);
@@ -290,11 +358,12 @@ vec4 combine(vec4 t[4])
     R5 = v_specular;
     R8 = t[0]; R9 = t[1]; R10 = t[2]; R11 = t[3];
     // r0.a starts as texture 0's alpha, or 1 with stage 0 off.
-    R12.a = (rc.fin.w & 31u) != 0u ? t[0].a : 1.0;
+    R12.a = (fin.w & 31u) != 0u ? t[0].a : 1.0;
 
     for (uint s = 0u; s < n; s++) {
-        uint icw = rc.cw[s].x, aicw = rc.cw[s].y;
-        uint ocw = rc.cw[s].z, aocw = rc.cw[s].w;
+        uvec4 w = cw_of(s);
+        uint icw = w.x, aicw = w.y;
+        uint ocw = w.z, aocw = w.w;
         uint fl = ocw >> 12, afl = aocw >> 12;
         R1 = rc.c0[s];
         R2 = rc.c1[s];
@@ -338,8 +407,8 @@ vec4 combine(vec4 t[4])
     }
 
     vec4 o;
-    if (rc.fin.x != 0u || rc.fin.y != 0u) {
-        uint f0 = rc.fin.x, f1 = rc.fin.y, ff = f1 & 255u;
+    if (fin.x != 0u || fin.y != 0u) {
+        uint f0 = fin.x, f1 = fin.y, ff = f1 & 255u;
         R1 = rc.fc0;
         R2 = rc.fc1;
         // V1R0 sum: optional complements (0x40 v1, 0x20 r0), clamp (0x80).

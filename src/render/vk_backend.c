@@ -160,6 +160,20 @@ typedef struct {
     float    eye[4];         /* SET_EYE_VECTOR */
 } VkbCombiners;
 
+/* A pipeline made for one combiner program (pipeline_for): the structural
+ * part of VkbCombiners -- the used stages' combiner words, fin and misc --
+ * as nv2a.frag's specialization constants, so the driver compiles that
+ * program instead of the interpreter. vsh: built on the vertex-program
+ * pipeline. Built by a worker thread (variant_worker). */
+#define VKB_VARIANT_KEY 40
+#define VKB_VARIANTS    1024         /* hash table slots, a power of two */
+typedef struct {
+    uint32_t   key[VKB_VARIANT_KEY];
+    int        vsh;
+    int        state;                /* 0 free, 1 queued, 2 ready, 3 failed (pipeline_for) */
+    VkPipeline p;
+} VkbVariant;
+
 /* Bindings of the push-descriptor set: four stage samplers, the UBO, then the
  * same four stages as cube samplers. */
 #define VKB_BIND_RC   4
@@ -215,7 +229,7 @@ static struct {
     double            perf_ns_per_tick;
     int               perf_pending;        /* both timestamps of the last frame written */
     uint64_t          perf_frame_start;    /* SDL performance counter, frame start */
-    double            perf_gpu_ms, perf_wait_ms, perf_frame_ms;
+    double            perf_gpu_ms, perf_wait_ms, perf_frame_ms, perf_present_ms;
     uint32_t          perf_frames;
 
     VkbSurface        surfaces[VKB_MAX_SURFACES];
@@ -233,6 +247,11 @@ static struct {
     VkPipelineLayout  pipe_layout;
     VkPipeline        pipeline;
     VkPipeline        pipeline_vsh;        /* vertex programs on the GPU; NULL: CPU only */
+    VkShaderModule    vs, vs_vsh, fs;      /* kept for the variants (build_pipeline) */
+    VkPipelineCache   pcache;
+    VkbVariant        variants[VKB_VARIANTS];
+    uint32_t          nvariants;           /* built so far */
+    double            variant_ms;          /* time spent building them */
     VkPipeline        bound;               /* bound in V.cmd (NULL after a new scope) */
     VkDeviceSize      ssbo_align;          /* minStorageBufferOffsetAlignment */
     uint32_t          frame_serial;        /* command buffers begun */
@@ -780,16 +799,13 @@ static VkShaderModule shader_module(const uint32_t *code, size_t bytes)
     return m;
 }
 
-/* The one graphics pipeline. Everything the NV2A changes per batch is dynamic
- * state; what stays fixed is the vertex layout (Nv2aVertex), triangle lists,
- * the attachment formats and filled polygons. */
-static int create_pipeline(void)
+/* A graphics pipeline: nv2a.vert (vsh 0) or nv2a_vsh.vert (vsh 1) with
+ * nv2a.frag, specialised for one combiner program when spec is set
+ * (pipeline_for). Everything the NV2A changes per batch is dynamic state;
+ * what stays fixed is the vertex layout (Nv2aVertex), triangle lists, the
+ * attachment formats and filled polygons. */
+static int build_pipeline(int vsh, const VkSpecializationInfo *spec, VkPipeline *out)
 {
-    VkDescriptorSetLayoutBinding bind[VKB_NBIND_VSH];
-    VkDescriptorSetLayoutCreateInfo dslci;
-    VkPushConstantRange pcr;
-    VkPipelineLayoutCreateInfo plci;
-    VkShaderModule vs, fs;
     VkPipelineShaderStageCreateInfo stages[2];
     VkVertexInputBindingDescription vbind[2];
     VkVertexInputAttributeDescription vattr[9];
@@ -820,47 +836,15 @@ static int create_pipeline(void)
     };
     int i;
 
-    memset(bind, 0, sizeof bind);
-    for (i = 0; i < VKB_NBIND_VSH; i++) {
-        bind[i].binding = (uint32_t)i;
-        bind[i].descriptorType = i == VKB_BIND_VDATA ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-                               : (i == VKB_BIND_RC || i >= VKB_NBIND)
-                                 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                                 : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bind[i].descriptorCount = 1;
-        bind[i].stageFlags = i >= VKB_NBIND ? VK_SHADER_STAGE_VERTEX_BIT
-                                            : VK_SHADER_STAGE_FRAGMENT_BIT;
-    }
-    memset(&dslci, 0, sizeof dslci);
-    dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-    dslci.bindingCount = VKB_NBIND_VSH;
-    dslci.pBindings = bind;
-    VK_CHECK(vkCreateDescriptorSetLayout(V.device, &dslci, NULL, &V.set_layout));
-
-    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    pcr.offset = 0;
-    pcr.size = sizeof(VkbPush);
-    memset(&plci, 0, sizeof plci);
-    plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plci.setLayoutCount = 1;
-    plci.pSetLayouts = &V.set_layout;
-    plci.pushConstantRangeCount = 1;
-    plci.pPushConstantRanges = &pcr;
-    VK_CHECK(vkCreatePipelineLayout(V.device, &plci, NULL, &V.pipe_layout));
-
-    vs = shader_module(k_vert_spv, sizeof k_vert_spv);
-    fs = shader_module(k_frag_spv, sizeof k_frag_spv);
-    if (!vs || !fs)
-        return 0;
     memset(stages, 0, sizeof stages);
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vs;
+    stages[0].module = vsh ? V.vs_vsh : V.vs;
     stages[0].pName = "main";
     stages[1] = stages[0];
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = fs;
+    stages[1].module = V.fs;
+    stages[1].pSpecializationInfo = spec;
 
     /* Binding 0: Nv2aVertex. Binding 1: Nv2aVertexExt, its stride dynamic so
      * a batch without the extension can bind one zeroed element (stride 0). */
@@ -948,26 +932,70 @@ static int create_pipeline(void)
     gpci.pColorBlendState = &cb;
     gpci.pDynamicState = &dyn;
     gpci.layout = V.pipe_layout;
-    VK_CHECK(vkCreateGraphicsPipelines(V.device, VK_NULL_HANDLE, 1, &gpci, NULL, &V.pipeline));
-    vkDestroyShaderModule(V.device, vs, NULL);
-
-    /* The same pipeline with nv2a_vsh.vert: no vertex input (it reads the
-     * vertex bytes from binding 12 by gl_VertexIndex), so no dynamic stride.
-     * Without it every program batch takes the executor's CPU path. */
-    if (!getenv("AMPED2_VK_CPU_VSH") && (vs = shader_module(k_vsh_spv, sizeof k_vsh_spv))) {
-        VkResult r;
-        stages[0].module = vs;
+    if (vsh) {
+        /* nv2a_vsh.vert reads the vertex bytes from binding 12 by
+         * gl_VertexIndex: no vertex input, so no dynamic stride. */
         memset(&vi, 0, sizeof vi);
         vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
         dyn.dynamicStateCount = sizeof dynamic / sizeof dynamic[0] - 1;
-        r = vkCreateGraphicsPipelines(V.device, VK_NULL_HANDLE, 1, &gpci, NULL, &V.pipeline_vsh);
-        if (r != VK_SUCCESS) {
-            fprintf(stderr, "  [VK] vertex-program pipeline failed (%d): CPU transforms\n", (int)r);
-            V.pipeline_vsh = VK_NULL_HANDLE;
-        }
-        vkDestroyShaderModule(V.device, vs, NULL);
     }
-    vkDestroyShaderModule(V.device, fs, NULL);
+    return vkCreateGraphicsPipelines(V.device, V.pcache, 1, &gpci, NULL, out) == VK_SUCCESS;
+}
+
+static int create_pipeline(void)
+{
+    VkDescriptorSetLayoutBinding bind[VKB_NBIND_VSH];
+    VkDescriptorSetLayoutCreateInfo dslci;
+    VkPushConstantRange pcr;
+    VkPipelineLayoutCreateInfo plci;
+    int i;
+    VkPipelineCacheCreateInfo pcci;
+
+    memset(bind, 0, sizeof bind);
+    for (i = 0; i < VKB_NBIND_VSH; i++) {
+        bind[i].binding = (uint32_t)i;
+        bind[i].descriptorType = i == VKB_BIND_VDATA ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                               : (i == VKB_BIND_RC || i >= VKB_NBIND)
+                                 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                 : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bind[i].descriptorCount = 1;
+        bind[i].stageFlags = i >= VKB_NBIND ? VK_SHADER_STAGE_VERTEX_BIT
+                                            : VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    memset(&dslci, 0, sizeof dslci);
+    dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    dslci.bindingCount = VKB_NBIND_VSH;
+    dslci.pBindings = bind;
+    VK_CHECK(vkCreateDescriptorSetLayout(V.device, &dslci, NULL, &V.set_layout));
+
+    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pcr.offset = 0;
+    pcr.size = sizeof(VkbPush);
+    memset(&plci, 0, sizeof plci);
+    plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &V.set_layout;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pcr;
+    VK_CHECK(vkCreatePipelineLayout(V.device, &plci, NULL, &V.pipe_layout));
+
+    memset(&pcci, 0, sizeof pcci);
+    pcci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    if (vkCreatePipelineCache(V.device, &pcci, NULL, &V.pcache) != VK_SUCCESS)
+        V.pcache = VK_NULL_HANDLE;
+    V.vs = shader_module(k_vert_spv, sizeof k_vert_spv);
+    V.fs = shader_module(k_frag_spv, sizeof k_frag_spv);
+    if (!V.vs || !V.fs || !build_pipeline(0, NULL, &V.pipeline))
+        return 0;
+
+    /* The same pipeline with nv2a_vsh.vert. Without it every program
+     * batch takes the executor's CPU path. */
+    if (!getenv("AMPED2_VK_CPU_VSH") && (V.vs_vsh = shader_module(k_vsh_spv, sizeof k_vsh_spv))
+            && !build_pipeline(1, NULL, &V.pipeline_vsh)) {
+        fprintf(stderr, "  [VK] vertex-program pipeline failed: CPU transforms\n");
+        V.pipeline_vsh = VK_NULL_HANDLE;
+    }
     return 1;
 }
 
@@ -1155,7 +1183,7 @@ static int init_vulkan(void)
         memset(&qci, 0, sizeof qci);
         qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
         qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        qci.queryCount = 2;
+        qci.queryCount = 3;
         for (k = 0; k < VKB_FRAMES && p.limits.timestampComputeAndGraphics; k++)
             if (vkCreateQueryPool(V.device, &qci, NULL, &V.slot[k].perf_qp) == VK_SUCCESS)
                 V.perf_ns_per_tick = p.limits.timestampPeriod;
@@ -1219,7 +1247,7 @@ static int ensure_recording(void)
     V.perf_qp = V.slot[V.cur].perf_qp;
     V.perf_pending = V.slot[V.cur].perf_pending;
     if (V.perf_qp) {
-        uint64_t t0 = SDL_GetPerformanceCounter(), t1, ts[2];
+        uint64_t t0 = SDL_GetPerformanceCounter(), t1, ts[3];
         double f = 1000.0 / (double)SDL_GetPerformanceFrequency();
         vkWaitForFences(V.device, 1, &V.frame_fence, VK_TRUE, UINT64_MAX);
         t1 = SDL_GetPerformanceCounter();
@@ -1227,9 +1255,10 @@ static int ensure_recording(void)
         if (V.perf_frame_start)
             V.perf_frame_ms += (double)(t1 - V.perf_frame_start) * f;
         V.perf_frame_start = t1;
-        if (V.perf_pending && vkGetQueryPoolResults(V.device, V.perf_qp, 0, 2, sizeof ts, ts,
+        if (V.perf_pending && vkGetQueryPoolResults(V.device, V.perf_qp, 0, 3, sizeof ts, ts,
                 sizeof ts[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
             V.perf_gpu_ms += (double)(ts[1] - ts[0]) * V.perf_ns_per_tick / 1e6;
+            V.perf_present_ms += (double)(ts[1] - ts[2]) * V.perf_ns_per_tick / 1e6;
             V.perf_frames++;
         }
         V.perf_pending = 0;
@@ -1242,7 +1271,7 @@ static int ensure_recording(void)
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK_CHECK(vkBeginCommandBuffer(V.cmd, &bi));
     if (V.perf_qp) {
-        vkCmdResetQueryPool(V.cmd, V.perf_qp, 0, 2);
+        vkCmdResetQueryPool(V.cmd, V.perf_qp, 0, 3);
         vkCmdWriteTimestamp(V.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, V.perf_qp, 0);
     }
     V.recording = 1;
@@ -2206,6 +2235,126 @@ static int combiners_upload(const Nv2aBatchExt *e, VkDeviceSize *off)
     return 1;
 }
 
+/* Building a variant is a driver compile (30-100 ms), too long for the
+ * render thread: the game waits for it and its sound stutters. A worker
+ * thread builds them; until one is ready its batches draw with the generic
+ * pipeline (the same picture, interpreted per pixel). State per variant:
+ * 0 free, 1 queued, 2 ready, 3 failed (generic for good). */
+#define VKB_VQ 256
+static struct {
+    SDL_mutex  *lock;
+    SDL_cond   *cond;
+    SDL_Thread *thread;
+    uint32_t    q[VKB_VQ], head, tail;
+} VQ;
+
+static void variant_build(VkbVariant *v)
+{
+    VkSpecializationMapEntry map[1 + VKB_VARIANT_KEY];
+    uint32_t data[1 + VKB_VARIANT_KEY], i;
+    VkSpecializationInfo si;
+    VkPipeline pl = VK_NULL_HANDLE;
+    uint64_t t0 = SDL_GetPerformanceCounter();
+    int ok;
+
+    data[0] = VK_TRUE;                       /* SPEC */
+    memcpy(data + 1, v->key, sizeof v->key);
+    for (i = 0; i < 1 + VKB_VARIANT_KEY; i++) {
+        map[i].constantID = i;
+        map[i].offset = i * 4;
+        map[i].size = 4;
+    }
+    si.mapEntryCount = 1 + VKB_VARIANT_KEY;
+    si.pMapEntries = map;
+    si.dataSize = sizeof data;
+    si.pData = data;
+    ok = build_pipeline(v->vsh, &si, &pl);
+    v->p = ok ? pl : VK_NULL_HANDLE;
+    __atomic_store_n(&v->state, ok ? 2 : 3, __ATOMIC_RELEASE);
+    V.nvariants++;
+    V.variant_ms += (double)(SDL_GetPerformanceCounter() - t0) * 1000.0
+                    / (double)SDL_GetPerformanceFrequency();
+    if (!ok || V.nvariants <= 2 || (V.nvariants & (V.nvariants - 1)) == 0)
+        fprintf(stderr, "  [VK] combiner pipelines: %u (%.0f ms building them, in the background)%s\n",
+                V.nvariants, V.variant_ms, ok ? "" : " -- one failed, generic");
+}
+
+static int SDLCALL variant_worker(void *unused)
+{
+    (void)unused;
+    for (;;) {
+        uint32_t slot;
+        SDL_LockMutex(VQ.lock);
+        while (VQ.head == VQ.tail)
+            SDL_CondWait(VQ.cond, VQ.lock);
+        slot = VQ.q[VQ.tail++ % VKB_VQ];
+        SDL_UnlockMutex(VQ.lock);
+        variant_build(&V.variants[slot]);
+    }
+    return 0;
+}
+
+/* The pipeline for the batch's combiner program (V.last_rc, uploaded by
+ * draw_prepare): its variant when built, else the generic one (and the
+ * variant queued). AMPED2_VK_NO_SPEC=1: generic only. */
+static VkPipeline pipeline_for(int vsh)
+{
+    static int off = -1;
+    const VkbCombiners *u = &V.last_rc;
+    VkPipeline base = vsh ? V.pipeline_vsh : V.pipeline;
+    uint32_t key[VKB_VARIANT_KEY], h = 2166136261u, n, i, slot = 0;
+    VkbVariant *v = NULL;
+    int st;
+
+    if (off < 0) {
+        off = getenv("AMPED2_VK_NO_SPEC") != NULL;
+        if (!off) {
+            VQ.lock = SDL_CreateMutex();
+            VQ.cond = SDL_CreateCond();
+            VQ.thread = VQ.lock && VQ.cond
+                      ? SDL_CreateThread(variant_worker, "vk-pipelines", NULL) : NULL;
+            if (!VQ.thread)
+                off = 1;
+            else
+                SDL_DetachThread(VQ.thread);
+        }
+    }
+    if (off)
+        return base;
+    memset(key, 0, sizeof key);
+    n = u->fin[2] & 255u;
+    if (n > 8)
+        n = 8;
+    for (i = 0; i < n; i++)
+        memcpy(key + i * 4, u->cw[i], 16);  /* unused stages stay zero: one variant */
+    memcpy(key + 32, u->fin, 16);
+    memcpy(key + 36, u->misc, 16);
+    for (i = 0; i < VKB_VARIANT_KEY; i++)
+        h = (h ^ key[i]) * 16777619u;
+    h ^= (uint32_t)vsh;
+    for (i = 0; i < VKB_VARIANTS; i++) {
+        slot = (h + i) & (VKB_VARIANTS - 1);
+        v = &V.variants[slot];
+        st = __atomic_load_n(&v->state, __ATOMIC_ACQUIRE);
+        if (!st)
+            break;
+        if (v->vsh == vsh && !memcmp(v->key, key, sizeof key))
+            return st == 2 ? v->p : base;
+    }
+    if (i == VKB_VARIANTS)
+        return base;                         /* table full */
+    SDL_LockMutex(VQ.lock);
+    if (VQ.head - VQ.tail < VKB_VQ) {
+        memcpy(v->key, key, sizeof key);
+        v->vsh = vsh;
+        __atomic_store_n(&v->state, 1, __ATOMIC_RELEASE);
+        VQ.q[VQ.head++ % VKB_VQ] = slot;
+        SDL_CondSignal(VQ.cond);
+    }
+    SDL_UnlockMutex(VQ.lock);
+    return base;
+}
+
 static void bind_pipeline(VkPipeline p)
 {
     if (V.bound != p) {
@@ -2466,7 +2615,7 @@ static void vkb_draw(const Nv2aSurface *g, const Nv2aBatch *b)
         memset(edst, 0, (size_t)ebytes);
 
     begin_rendering(c.s, c.d);
-    bind_pipeline(V.pipeline);
+    bind_pipeline(c.use_rc ? pipeline_for(0) : V.pipeline);
     apply_state(b->state);
     draw_frag_state(b, &c);
     overlay = c.s->wide && overlay_2d(b);
@@ -2596,7 +2745,7 @@ static int vkb_draw_program(const Nv2aSurface *g, const Nv2aBatch *b,
     }
 
     begin_rendering(c.s, c.d);
-    bind_pipeline(V.pipeline_vsh);
+    bind_pipeline(c.use_rc ? pipeline_for(1) : V.pipeline_vsh);
     apply_state(b->state);
     draw_frag_state(b, &c);
     if (camera_wide(c.s))
@@ -2717,9 +2866,10 @@ static void update_title(void)
                     (double)V.stat_hash_bytes / 1e6);
             if (V.perf_frames) {
                 double n = (double)V.perf_frames;
-                fprintf(stderr, "  [PERF] gpu %.2f ms/frame | cpu waits for the gpu %.2f ms/frame | "
-                        "frame %.2f ms\n", V.perf_gpu_ms / n, V.perf_wait_ms / n, V.perf_frame_ms / n);
-                V.perf_gpu_ms = V.perf_wait_ms = V.perf_frame_ms = 0.0;
+                fprintf(stderr, "  [PERF] gpu %.2f ms/frame (presenting %.2f) | cpu waits for the gpu "
+                        "%.2f ms/frame | frame %.2f ms\n", V.perf_gpu_ms / n, V.perf_present_ms / n,
+                        V.perf_wait_ms / n, V.perf_frame_ms / n);
+                V.perf_gpu_ms = V.perf_wait_ms = V.perf_frame_ms = V.perf_present_ms = 0.0;
                 V.perf_frames = 0;
             }
             V.stat_decodes = V.stat_new = V.stat_hashes = 0;
@@ -2931,6 +3081,8 @@ static void present(int real_flip)
     }
     img = V.swap_images[idx];
     end_rendering();
+    if (V.perf_qp)                          /* the game's drawing ends here, presenting starts */
+        vkCmdWriteTimestamp(V.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, V.perf_qp, 2);
 
     memset(&range, 0, sizeof range);
     range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;

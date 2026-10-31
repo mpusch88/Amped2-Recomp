@@ -702,3 +702,16 @@ _(date – what was done, what was found, next step)_
     render-target guess.
   - Menus on a widened back buffer are presented as the middle with black sides, and their draws are clipped to that
     middle (nothing drawn that is not shown): main menu at 4x 59 -> 76 fps.
+- 2026-10-31 – **Vulkan performance at high resolution scales** (branch perf/4x-menus; 21:9, RTX 4070 SUPER).
+  `AMPED2_VK_PERF=1` logs GPU time per frame (timestamps), the time spent presenting, the CPU's wait for the GPU and
+  the frame interval. Findings and fixes, main menu with the rider preview at 4x (6720x2880 back buffers):
+  - 23.8 fps, GPU 36.9 ms/frame, and the CPU waited for the whole GPU frame before recording the next one.
+  - nv2a.frag kept the combiner registers in a dynamically indexed array (local memory on the GPU): plain variables
+    behind switches -> 45.5 fps (GPU 16.6 ms).
+  - Two frames in flight (command buffer, fence, semaphore, rings, timestamps per slot) -> 59 fps, GPU-bound.
+  - Menus clipped to the middle they are presented as -> 76 fps.
+  - Without the combiner path the frame took 2.3 ms of GPU time: the per-pixel interpreter was ~80 % of it. Each
+    combiner program now gets a pipeline with the program as specialization constants (the driver compiles that
+    program alone), built on a worker thread (30-100 ms each, ~32 per session) while the generic pipeline draws ->
+    105 fps (GPU 6.7 ms). Building them on the render thread stalled the game and its sound.
+  - A ride at 4x: ~85 -> 118 fps; at 2x 137 fps, CPU-bound now (GPU 37 %): texture re-validation is next.
