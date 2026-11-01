@@ -241,7 +241,9 @@ static struct {
     uint32_t          scale;               /* resolution scale (settings) */
     double            aspect;              /* the aspect ratio setting, width / height */
     int               scissor_mid;         /* scissor is the un-widened middle (set_scissor) */
-    int               band_cur, band_prev; /* a full-width 2D overlay this / last frame (wide_view) */
+    int               band_cur;            /* a full-width 2D overlay in this frame (wide_view) */
+    uint32_t          band_ms;             /* SDL ticks of the last frame that had one, 0 never */
+    uint32_t          band_gap;            /* frames since then */
     uint32_t          shown_va[4];         /* surfaces the title has flipped */
     uint32_t          rt_flip;             /* last flip with draws off screen, +1 */
     VkPresentModeKHR  present_mode;
@@ -2844,11 +2846,15 @@ static int in_ride(void)
  * screen without a frame of its own -- a 3D scene with a panel floating over
  * it (the challenge card). A menu with its own frame (a 2D overlay across the
  * whole width: the level select's bands, a full background) is shown as its
- * middle with black bars, and only that middle is drawn (menu_middle). The
- * last frame's overlays decide, so a screen change shows one frame late. */
+ * middle with black bars, and only that middle is drawn (menu_middle).
+ * Bars come at once (the frame after a menu frame was drawn) but go only
+ * after 6 frames and 100 ms without one: a fade between menus draws none for
+ * 4-5 frames, and a level load shows a few frames far apart -- the sides
+ * would flash up in between. */
 static int wide_view(void)
 {
-    return in_ride() || !V.band_prev;
+    return in_ride() || !V.band_ms
+        || (V.band_gap >= 6 && (int32_t)(SDL_GetTicks() - V.band_ms) > 100);
 }
 
 /* The logical (title-visible) size of the surface, scaled to fit the window
@@ -3093,7 +3099,12 @@ static void present(int real_flip)
     }
     if (real_flip) {
         V.last_frame_draws = V.frame_draws;
-        V.band_prev = V.band_cur;
+        if (V.band_cur) {
+            V.band_ms = SDL_GetTicks() | 1;  /* 0 means never */
+            V.band_gap = 0;
+        } else if (V.band_gap < 1000) {
+            V.band_gap++;
+        }
         V.band_cur = 0;
         V.frame_draws = 0;
     }
