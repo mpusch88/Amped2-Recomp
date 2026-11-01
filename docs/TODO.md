@@ -115,8 +115,9 @@ First batch (done 2026-10-20, `amped2_recomp --settings` / `scripts/run.sh --set
 - [ ] Ride frame rate is CPU-bound at ~85-115 fps (menus 200-800): the guest spins in D3D (`sub_0031EA90`, 22 %)
       waiting for the NV2A thread – pushbuffer decode (`nv2a_pb_exec_method` 11 %, `note` 4 %), texture
       re-validation hashing (`hash_guest_texture` 7 %, ~1 GB/s). Needed for 144-270 fps on the slope.
-- [ ] Ride/menu detection for the aspect ratio is a heuristic (draws into an off-screen target = ride, in_ride() in
-      vk_backend.c); a game-state flag would be exact. Splash screen at boot counts as a ride for ~30 flips
+- [x] Ride/menu detection (in_ride() in vk_backend.c): NTSC-U by the ride's camera update (call site 0x00244912,
+      the last camera update decides – a paused ride stays a ride); PAL still guesses by draws into an off-screen
+      target (the splash screen counts as a ride for ~30 flips, and in the 720p mode the 3D menus would too)
 - [x] Hor+ pop-in at the sides: gone with the native HD mode and the camera aspect hook (16:9 and wider); 16:10
       shows the 720p picture with thin bars
 - [x] Widescreen: HUD elements the game parks off screen (a camera counter past x 640) stay hidden – 2D overlays are
@@ -138,8 +139,8 @@ Backlog (chosen 2026-10-20):
   - [x] Native HD widescreen (2026-10-30): the game's own 720p mode (runtime patch 0004 grants the HD permissions)
         with its 16:9 HUD layout; 21:9 through a camera aspect hook, culling for the full width (NTSC-U)
   - [ ] The game's 720p menus are stretched (4:3 art, as on the Xbox): text and pictures at their own proportions
-  - [ ] 21:9: the level-select menu's 3D flyover fills the full width beside the menu's 16:9 frame – black bars at
-        the sides, like the other menus
+  - [x] 21:9: the level-select menu's 3D flyover filled the full width beside the menu's 16:9 frame – menus with a
+        3D scene are pillarboxed now (rides told apart by the ride camera's update, NTSC-U)
   - [ ] HUD/UI correction for wider than 16:9 (edge-anchored elements instead of the 16:9 middle)
   - [ ] FOV slider (on top of the Hor+ aspect-ratio change)
   - [ ] VSync on/off/adaptive, frame limiter options, FPS / frame-time overlay

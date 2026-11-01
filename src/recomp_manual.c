@@ -283,13 +283,25 @@ void amped2_boot_movie(const char *which, const char *skip_env, void (*play)(voi
  * ride camera and the menu's rider preview, whose view the renderer stretches
  * the same way; 4:3 cameras and the square render-target cameras keep theirs.
  * AMPED2_HD_CAMERA=0 turns it off. g_amped2_camera_aspect tells the renderer
- * that the 3D view is wide. */
+ * that the 3D view is wide.
+ *
+ * The same hook tells rides from menus: only a ride updates its camera from
+ * AMPED2_RIDE_CAMERA_CALL; the menus with a 3D scene (the rider preview, the
+ * level select's flyover) use other call sites. Whether the last camera
+ * update was the ride's is what the renderer reads (in_ride, vk_backend.c)
+ * -- the pause menu updates no camera, so a paused ride stays a ride. 0 in
+ * amped2_ride_camera_call: not known for this build. */
 volatile float g_amped2_camera_aspect;
+volatile int g_amped2_ride_camera;
+const unsigned amped2_ride_camera_call = AMPED2_RIDE_CAMERA_CALL;
 
 void amped2_camera_aspect_hook(void)
 {
     static float target = -1.0f;
     uint32_t cam = g_eax, bits;
+
+    if (AMPED2_RIDE_CAMERA_CALL)
+        g_amped2_ride_camera = MEM32(g_esp) == AMPED2_RIDE_CAMERA_CALL;
 
     if (target < 0.0f) {
         const char *off = getenv("AMPED2_HD_CAMERA");

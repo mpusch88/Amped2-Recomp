@@ -691,3 +691,14 @@ _(date – what was done, what was found, next step)_
   entry instead of answering "no more files". A finished search now stays finished until the handle is closed or
   rescanned (runtime patch 0002, second part). User-tested: a new boarder appears once, deleting works. Saves were
   backed up first. The POSIX implementation is not checked for the same gap yet.
+- 2026-10-31 – **Rides told from menus by the ride camera; 3D menus pillarboxed at 21:9 (NTSC-U).**
+  - `in_ride()` guessed a ride from draws into an off-screen render target. In the 720p mode the menus with a 3D scene
+    use the 512x512 target too (main menu rider preview, level-select flyover, challenge card), so they were shown
+    at the full 21:9 width – the level select's flyover beside its 16:9 frame (user report).
+  - A camera trace in the aspect hook (all camera updates go through 0x0015F7B0) per 300 flips: front-end menus update
+    from 0x001D8380 / 0x00214469, the mountain menus from 0x0010D8BD, a ride only from 0x00244912
+    (`AMPED2_RIDE_CAMERA_CALL`, src/version/ntsc_u/amped2_addrs.h). The hook records whether the last camera update
+    was the ride's; the pause menu updates no camera, so a paused ride stays wide. PAL (address unknown) keeps the
+    render-target guess.
+  - Menus on a widened back buffer are presented as the middle with black sides, and their draws are clipped to that
+    middle (nothing drawn that is not shown): main menu at 4x 59 -> 76 fps.

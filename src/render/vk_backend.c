@@ -2400,6 +2400,14 @@ static int hud_clip(void)
     return on;
 }
 
+/* A menu on a widened back buffer is presented as its middle (present), so
+ * nothing outside it is drawn: at a high resolution scale the sides of a
+ * menu's 3D scene were a third of the frame's GPU time. */
+static int menu_middle(const VkbSurface *s)
+{
+    return s->wide && !in_ride();
+}
+
 /* Whether the batch's colour target is a widened back buffer. */
 static int target_wide(const Nv2aSurface *g)
 {
@@ -2466,7 +2474,7 @@ static void vkb_draw(const Nv2aSurface *g, const Nv2aBatch *b)
         c.pc.x3d = 1.0f;                        /* full-screen fade: edge to edge */
     else if (camera_wide(c.s) && !overlay)
         c.pc.x3d = 1.0f;                        /* the game's own wide view: stretched back */
-    set_scissor(c.s, !fullscreen && overlay && in_ride() && hud_clip());
+    set_scissor(c.s, menu_middle(c.s) || (!fullscreen && overlay && in_ride() && hud_clip()));
     vkCmdPushDescriptorSetKHR(V.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V.pipe_layout,
                               0, VKB_NBIND, c.w);
     vkCmdPushConstants(V.cmd, V.pipe_layout,
@@ -2593,7 +2601,7 @@ static int vkb_draw_program(const Nv2aSurface *g, const Nv2aBatch *b,
     draw_frag_state(b, &c);
     if (camera_wide(c.s))
         c.pc.x3d = 1.0f;                    /* the game's own wide view: stretched back */
-    set_scissor(c.s, 0);                    /* 3D: the whole widened surface */
+    set_scissor(c.s, menu_middle(c.s));     /* 3D: the whole widened surface in rides */
     {
         static const uint32_t bindings[4] = { VKB_BIND_VCONST, VKB_BIND_VPROG,
                                               VKB_BIND_VATTR, VKB_BIND_VDATA };
@@ -2641,14 +2649,21 @@ static void pump_events(void)
     }
 }
 
-/* A ride, not a menu: something was drawn into an off-screen render target
- * in the last half second of flips. Amped 2 renders its 512x512 target only
- * on the mountain (checked: created after the level loads, never in the
- * menus). Decides how a widened back buffer is presented. */
+/* A ride, not a menu. Decides how a widened back buffer is presented (a menu
+ * as its middle, with black bars at the sides) and what is drawn at all.
+ * Where the build knows the ride's camera update (amped2_camera_aspect_hook,
+ * NTSC-U), the last camera update tells it exactly -- a paused ride stays a
+ * ride. Otherwise: something drawn into an off-screen render target in the
+ * last half second of flips, which in the 720p mode also catches the menus
+ * with a 3D scene (the rider preview, the level select's flyover). */
 volatile unsigned amped2_vk_flip_count;
+extern const unsigned amped2_ride_camera_call;
+extern volatile int g_amped2_ride_camera;
 
 static int in_ride(void)
 {
+    if (amped2_ride_camera_call)
+        return g_amped2_ride_camera;
     return V.rt_flip && V.flips + 1 - V.rt_flip < 30;
 }
 
