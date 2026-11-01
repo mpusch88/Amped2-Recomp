@@ -243,7 +243,8 @@ static struct {
     int               scissor_mid;         /* scissor is the un-widened middle (set_scissor) */
     int               band_cur;            /* a full-width 2D overlay in this frame (wide_view) */
     int               ui_started;          /* a 2D overlay drawn in this frame (ui_model) */
-    uint32_t          band_ms;             /* SDL ticks of the last frame that had one, 0 never */
+    int               band_on;             /* a menu frame seen recently: wide_view() is 0 */
+    uint32_t          band_ms;             /* SDL ticks of the last frame that had one */
     uint32_t          band_gap;            /* frames since then */
     uint32_t          shown_va[4];         /* surfaces the title has flipped */
     uint32_t          rt_flip;             /* last flip with draws off screen, +1 */
@@ -1223,6 +1224,7 @@ static int init_vulkan(void)
             amped2_aspect_name(g_amped2_settings.aspect_ratio));
     V.dump_prefix = getenv("AMPED2_VK_DUMP");
     V.cap_prefix = getenv("AMPED2_VK_CAPTURE");
+    V.band_on = 1;                          /* the game starts with menus: bars until a scene */
     e = getenv("AMPED2_VK_DUMP_EVERY");
     V.dump_every = e && atoi(e) > 0 ? (uint32_t)atoi(e) : 60;
     return 1;
@@ -2913,14 +2915,15 @@ static int in_ride(void)
  * it (the challenge card). A menu with its own frame (a 2D overlay across the
  * whole width: the level select's bands, a full background) is shown as its
  * middle with black bars, and only that middle is drawn (menu_middle).
- * Bars come at once (the frame after a menu frame was drawn) but go only
- * after 6 frames and 100 ms without one: a fade between menus draws none for
- * 4-5 frames, and a level load shows a few frames far apart -- the sides
- * would flash up in between. */
+ * Bars come with the frame after a menu frame was drawn but go only after 6
+ * frames and 100 ms without one: a fade between menus draws none for 4-5
+ * frames, and a level load shows a few frames far apart -- the sides would
+ * flash up in between. Decided once per frame, after it was presented
+ * (band_frame_end), so a frame's draws, its interface models and its
+ * presentation agree. */
 static int wide_view(void)
 {
-    return in_ride() || !V.band_ms
-        || (V.band_gap >= 6 && (int32_t)(SDL_GetTicks() - V.band_ms) > 100);
+    return in_ride() || !V.band_on;
 }
 
 /* The logical (title-visible) size of the surface, scaled to fit the window
@@ -3131,7 +3134,7 @@ static void frame_pace(void)
 
 /* Present the current picture. real_flip: the title flipped (count it, log
  * it, dump it); otherwise a present for a new overlay frame between flips. */
-static void present(int real_flip)
+static void present_frame(int real_flip)
 {
     uint32_t idx;
     VkResult r;
@@ -3180,35 +3183,6 @@ static void present(int real_flip)
             V.cap_f = NULL;
             capture_dump = 1;
         }
-        if (V.cap_prefix) {                 /* AMPED2_VK_CAPTURE_FLIP=n: capture flip n without F10 */
-            static long at = -1;
-            if (at < 0) {
-                const char *e = getenv("AMPED2_VK_CAPTURE_FLIP");
-                at = e ? atol(e) : 0;
-            }
-            if (at && (long)V.flips + 1 == at)
-                V.cap_req = 1;
-        }
-        if (V.cap_req && V.cap_prefix) {
-            char path[512];
-            V.cap_req = 0;
-            snprintf(path, sizeof path, "%s%06u.txt", V.cap_prefix, V.flips + 1);
-            if ((V.cap_f = fopen(path, "w")) != NULL) {
-                extern volatile unsigned g_amped2_cam_log_n;
-                V.cap_cam0 = g_amped2_cam_log_n;
-                fprintf(V.cap_f, "flip %u: ride %d, wide view %d, camera aspect %.3f, menu frame %d ms ago\n",
-                        V.flips + 1, in_ride(), wide_view(), (double)g_amped2_camera_aspect,
-                        V.band_ms ? (int)(SDL_GetTicks() - V.band_ms) : -1);
-                fprintf(stderr, "  [VK] capturing flip %u to %s\n", V.flips + 1, path);
-            }
-        }
-        if (V.band_cur) {
-            V.band_ms = SDL_GetTicks() | 1;  /* 0 means never */
-            V.band_gap = 0;
-        } else if (V.band_gap < 1000) {
-            V.band_gap++;
-        }
-        V.band_cur = 0;
         V.ui_started = 0;
         V.frame_draws = 0;
     }
@@ -3328,6 +3302,51 @@ static void present(int real_flip)
         dump_surface(s);
         V.dump_prefix = keep;
     }
+}
+
+/* After a real flip was presented: the menu-frame state for the next frame
+ * (wide_view), then a capture requested for that frame. */
+static void band_frame_end(void)
+{
+    uint32_t now = SDL_GetTicks();
+
+    if (V.band_cur) {
+        V.band_on = 1;
+        V.band_ms = now;
+        V.band_gap = 0;
+    } else if (V.band_on && ++V.band_gap >= 6 && (uint32_t)(now - V.band_ms) > 100) {
+        V.band_on = 0;
+    }
+    V.band_cur = 0;
+    if (V.cap_prefix) {                 /* AMPED2_VK_CAPTURE_FLIP=n: capture flip n without F10 */
+        static long at = -1;
+        if (at < 0) {
+            const char *e = getenv("AMPED2_VK_CAPTURE_FLIP");
+            at = e ? atol(e) : 0;
+        }
+        if (at && (long)V.flips + 1 == at)
+            V.cap_req = 1;
+    }
+    if (V.cap_req && V.cap_prefix) {
+        char path[512];
+        V.cap_req = 0;
+        snprintf(path, sizeof path, "%s%06u.txt", V.cap_prefix, V.flips + 1);
+        if ((V.cap_f = fopen(path, "w")) != NULL) {
+            extern volatile unsigned g_amped2_cam_log_n;
+            V.cap_cam0 = g_amped2_cam_log_n;
+            fprintf(V.cap_f, "flip %u: ride %d, wide view %d, camera aspect %.3f, menu frame %d ms ago\n",
+                    V.flips + 1, in_ride(), wide_view(), (double)g_amped2_camera_aspect,
+                    V.band_on ? (int)(SDL_GetTicks() - V.band_ms) : -1);
+            fprintf(stderr, "  [VK] capturing flip %u to %s\n", V.flips + 1, path);
+        }
+    }
+}
+
+static void present(int real_flip)
+{
+    present_frame(real_flip);
+    if (real_flip)
+        band_frame_end();
 }
 
 static void vkb_flip(void)
