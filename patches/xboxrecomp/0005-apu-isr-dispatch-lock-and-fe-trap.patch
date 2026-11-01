@@ -1,0 +1,126 @@
+diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
+--- a/src/apu/apu_core.c
++++ b/src/apu/apu_core.c
+@@ -242,16 +242,14 @@
+      * thread is a new OS thread and needs its own TIB. g_fs_base itself
+      * cannot tell, as every thread starts at the main thread's TIB. */
+     static APU_TLS int tib_ready;
+-    static unsigned held_off;
+     uint32_t kint, routine, context;
+     apu_guest_fn fn;
+     int slot;
+ 
+     if (!InterlockedCompareExchange(&s_irq_line, 0, 0))
+         return;
+-    if (xbox_IrqlBlocksInterrupts() && ++held_off <= 50)
+-        return;
+-    held_off = 0;
++    if (xbox_IrqlBlocksInterrupts())
++        return;
+     kint = xbox_GetConnectedInterrupt(APU_VECTOR);
+     if (!kint)
+         return;
+@@ -1135,7 +1133,7 @@
+          * reposting front-end commands -- is what lets the rest of
+          * DirectSound initialisation finish. Without the tick the title
+          * re-runs the sequencer setup forever and never gets past audio. */
+-        {
++        if (!fe_trapped) {
+             uint32_t sectl = qatomic_read(&d->regs[NV_PAPU_SECTL]);
+             uint32_t ssl = qatomic_read(&d->regs[NV_PAPU_SSL]);
+             d->sample_count += NUM_SAMPLES_PER_FRAME;
+diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
+--- a/src/apu/apu_vp.c
++++ b/src/apu/apu_vp.c
+@@ -172,7 +172,6 @@
+ static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
+ {
+     assert(v < MCPX_HW_MAX_VOICES);
+-    qemu_mutex_lock(&d->lock);
+ 
+     uint64_t mask = 1ULL << (v % 64);
+     if (lock) {
+@@ -182,7 +181,6 @@
+     }
+ 
+     qemu_cond_signal(&d->cond);
+-    qemu_mutex_unlock(&d->lock);
+ }
+ 
+ static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
+@@ -211,8 +209,14 @@
+ {
+     unsigned int slot;
+ 
+-    d->regs[NV_PAPU_FEDECMETH] = method;
+-    d->regs[NV_PAPU_FEDECPARAM] = argument;
++    /* Preserve a latched FE trap (e.g. SE2FE_IDLE_VOICE) until the ISR
++     * clears FEMETHMODE_TRAPPED; otherwise concurrent guest PIO writes
++     * clobber FEDECMETH/FEDECPARAM before the ISR reads them. */
++    if ((d->regs[NV_PAPU_FECTL] & NV_PAPU_FECTL_FEMETHMODE)
++            != NV_PAPU_FECTL_FEMETHMODE_TRAPPED) {
++        d->regs[NV_PAPU_FEDECMETH] = method;
++        d->regs[NV_PAPU_FEDECPARAM] = argument;
++    }
+     {   /* RECOMP_APU_VOICE_LOG=<voice>: every method that names that voice --
+          * while it is the current voice, or as the handle argument of the
+          * voice methods below 0x200 (ON, OFF, RELEASE, PAUSE ...). A VOLA
+@@ -249,6 +253,17 @@
+     unsigned int selected_handle, list;
+ 
+     switch (method) {
++    case 0x00000104: /* NV1BA0_PIO_SYNCHRONIZE */
++        if (d->regs[NV_PAPU_FENADDR]) {
++            stb_phys(address_space_memory, d->regs[NV_PAPU_FENADDR] + 15,
++                     NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
++            stb_phys(address_space_memory, d->regs[NV_PAPU_FENADDR] + 14, 1);
++        }
++        break;
++
++    case 0x0000010C: /* NV1BA0_PIO_SET_SE2FE_PROTECTION */
++        break;
++
+     case NV1BA0_PIO_VOICE_LOCK:
+         voice_lock(d, (uint16_t)d->regs[NV_PAPU_FECV], argument & 1);
+         break;
+@@ -647,8 +662,12 @@
+     MCPXAPUState *d = (MCPXAPUState *)opaque;
+     (void)size;
+ 
+-    /* Dispatch known methods through fe_method */
++    /* Dispatch known methods through fe_method under the APU lock so PIO
++     * writes do not race mcpx_apu_vp_frame on d->regs, d->vp, or RAM voice
++     * bitfields. */
++    qemu_mutex_lock(&d->lock);
+     fe_method(d, (uint32_t)addr, (uint32_t)val);
++    qemu_mutex_unlock(&d->lock);
+ }
+ 
+ /* ============================================================
+diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
+--- a/src/kernel/kernel_hal.c
++++ b/src/kernel/kernel_hal.c
+@@ -147,7 +147,7 @@
+ 
+ static void dispatch_lock_take(void)
+ {
+-    if (t_in_isr || !dispatch_lock_on())
++    if (!dispatch_lock_on())
+         return;
+     if (t_entering_dpc) {
+         /* A DPC waits for raised threads, but not forever. */
+@@ -306,7 +306,13 @@
+     if (level > DISPATCH_LEVEL)
+         t_in_isr++;
+     if (g_current_irql != (KIRQL)level) {
+-        t_entering_dpc = (level == DISPATCH_LEVEL);
++        /* Both DPCs (level 2) and device ISRs (level > 2) must take the
++         * dispatch lock: KeInsertQueueDpc runs DPCs inline inside the ISR
++         * (where g_current_irql is already 16, so irql_track(16, 2) does not
++         * cross the DISPATCH_LEVEL boundary), and DirectSound's APU ISR
++         * mutates the same voice lists and registers that DISPATCH_LEVEL
++         * code protects. */
++        t_entering_dpc = 1;
+         irql_track(g_current_irql, (KIRQL)level, IRQL_CALLER());
+         t_entering_dpc = 0;
+         g_current_irql = (KIRQL)level;

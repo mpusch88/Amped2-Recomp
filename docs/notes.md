@@ -744,3 +744,16 @@ _(date – what was done, what was found, next step)_
     draws and its presentation could disagree when the bars went away. It is decided once per frame after
     presenting now (`band_frame_end`; exact time + flag, unsigned comparison), bars on from the start. Route three
     times: one switch each. Linux (Docker) CI + full build pass at 25d178c.
+- 2026-11-01 – **Audio distortion and freeze at high frame rates (APU ISR / DirectSound race, patch 0005).**
+  - On `perf/4x-menus` (with menu frame rates 3–4x higher), the game froze after loud distorted audio.
+  - Root cause 1 (`kernel_hal.c`): `bridge_KeInsertQueueDpc` runs DPCs inline (`kernel_run_dpc` ->
+    `xbox_IrqlEnterInterrupt(2)`). When the APU ISR (`xbox_IrqlEnterInterrupt(16)`) queued DirectSound's DPC,
+    `g_current_irql` was already 16 and `t_in_isr` was 1, so `irql_track(16, 2)` saw `was == now == 1` and
+    `dispatch_lock_take()` returned early (`if (t_in_isr) return`). Both the APU ISR (`sub_00293B56`) and DirectSound's
+    DPC (`sub_00293A12`) ran without `s_dispatch_cs` while guest threads at `DISPATCH_LEVEL` mutated `NV_PAPU_FECV`
+    (`0xFE8202F8`) and the active/retired voice lists (`core + 0x488`, `core + 0x4A0`).
+  - Root cause 2 (`apu_vp.c`, `apu_core.c`): `mcpx_apu_vp_write` called `fe_method` without `d->lock` and unconditionally
+    overwrote `NV_PAPU_FEDECMETH`, clobbering latched `SE2FE_IDLE_VOICE` (`0x8000`) traps before the deferred ISR read
+    `0xFE801300`; `apu_deliver_irq` forced ISR delivery after 50 frames even when `xbox_IrqlBlocksInterrupts()` was true;
+    `0xFE820104` (`NV1BA0_PIO_SYNCHRONIZE`) was unhandled so `sub_0029941A` spun for 667 iterations on voice teardown.
+  - Fixed in `patches/xboxrecomp/0005-apu-isr-dispatch-lock-and-fe-trap.patch` (branch `fix/apu-isr-race`).
