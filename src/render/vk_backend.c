@@ -230,6 +230,9 @@ static struct {
     int               perf_pending;        /* both timestamps of the last frame written */
     uint64_t          perf_frame_start;    /* SDL performance counter, frame start */
     double            perf_gpu_ms, perf_wait_ms, perf_frame_ms, perf_present_ms;
+    /* CPU time per back-end entry (s_vk_backend_perf) and in texture_view,
+     * SDL performance-counter ticks, summed between [PERF] lines. */
+    uint64_t          pc_draw, pc_prog, pc_clear, pc_flip, pc_tex;
     uint32_t          perf_frames;
 
     VkbSurface        surfaces[VKB_MAX_SURFACES];
@@ -2410,9 +2413,14 @@ static int draw_prepare(const Nv2aSurface *g, const Nv2aBatch *b, VkbDrawCtx *c)
             c->stex[i] = c->e->textures[i];
     else
         c->stex[0] = b->texture;
-    for (i = 0; i < 4; i++)
-        if (c->stex[i])
-            c->views[i] = texture_view(c->stex[i]);
+    {
+        uint64_t t0 = V.perf_qp ? SDL_GetPerformanceCounter() : 0;
+        for (i = 0; i < 4; i++)
+            if (c->stex[i])
+                c->views[i] = texture_view(c->stex[i]);
+        if (t0)
+            V.pc_tex += SDL_GetPerformanceCounter() - t0;
+    }
     if (c->use_rc && !combiners_upload(c->e, &c->rc_off))
         return 0;
     return 1;
@@ -2623,14 +2631,17 @@ static void vkb_draw(const Nv2aSurface *g, const Nv2aBatch *b)
     draw_frag_state(b, &c);
     overlay = c.s->wide && overlay_2d(b);
     if (overlay && !V.band_cur) {
-        /* A menu frame: a 2D overlay across (nearly) the whole screen width. */
-        float x0 = 1e9f, x1 = -1e9f;
+        /* A menu frame: a 2D overlay spanning the screen from edge to edge --
+         * the front-end backgrounds (x -1.4 .. 1280.5 at 1280), the level
+         * select's bands (-9.9 .. 1288.9). Not the text that scrolls across
+         * the challenge card: it reaches far past both edges. */
+        float x0 = 1e9f, x1 = -1e9f, w = (float)c.s->gw;
         uint32_t i;
         for (i = 0; i < b->count; i++) {
             if (b->vertices[i].x < x0) x0 = b->vertices[i].x;
             if (b->vertices[i].x > x1) x1 = b->vertices[i].x;
         }
-        V.band_cur = x0 <= 0.02f * (float)c.s->gw && x1 >= 0.98f * (float)c.s->gw;
+        V.band_cur = x0 >= -16.0f && x0 <= 4.0f && x1 >= w - 4.0f && x1 <= w + 16.0f;
     }
     if (fullscreen)
         c.pc.x3d = 1.0f;                        /* full-screen fade: edge to edge */
@@ -2893,6 +2904,14 @@ static void update_title(void)
                 fprintf(stderr, "  [PERF] gpu %.2f ms/frame (presenting %.2f) | cpu waits for the gpu "
                         "%.2f ms/frame | frame %.2f ms\n", V.perf_gpu_ms / n, V.perf_present_ms / n,
                         V.perf_wait_ms / n, V.perf_frame_ms / n);
+                {
+                    double f = 1000.0 / (double)SDL_GetPerformanceFrequency() / n;
+                    fprintf(stderr, "  [PERF] cpu per frame: draw %.2f ms (textures %.2f) | vertex "
+                            "programs %.2f | clear %.2f | flip %.2f ms\n",
+                            (double)V.pc_draw * f, (double)V.pc_tex * f, (double)V.pc_prog * f,
+                            (double)V.pc_clear * f, (double)V.pc_flip * f);
+                    V.pc_draw = V.pc_prog = V.pc_clear = V.pc_flip = V.pc_tex = 0;
+                }
                 V.perf_gpu_ms = V.perf_wait_ms = V.perf_frame_ms = V.perf_present_ms = 0.0;
                 V.perf_frames = 0;
             }
@@ -3208,6 +3227,40 @@ static void vkb_idle(void)
 static const Nv2aBackend s_vk_backend = { vkb_clear, vkb_draw, vkb_flip, vkb_idle,
                                            vkb_draw_program };
 
+/* AMPED2_VK_PERF: the same entries, timed (the [PERF] cpu line). */
+static void perf_clear(const Nv2aSurface *s, const Nv2aRenderState *rs, uint32_t flags,
+                       uint32_t argb, uint32_t zs)
+{
+    uint64_t t0 = SDL_GetPerformanceCounter();
+    vkb_clear(s, rs, flags, argb, zs);
+    V.pc_clear += SDL_GetPerformanceCounter() - t0;
+}
+
+static void perf_draw(const Nv2aSurface *s, const Nv2aBatch *b)
+{
+    uint64_t t0 = SDL_GetPerformanceCounter();
+    vkb_draw(s, b);
+    V.pc_draw += SDL_GetPerformanceCounter() - t0;
+}
+
+static int perf_draw_program(const Nv2aSurface *s, const Nv2aBatch *b, const Nv2aProgramBatch *p)
+{
+    uint64_t t0 = SDL_GetPerformanceCounter();
+    int r = vkb_draw_program(s, b, p);
+    V.pc_prog += SDL_GetPerformanceCounter() - t0;
+    return r;
+}
+
+static void perf_flip(void)
+{
+    uint64_t t0 = SDL_GetPerformanceCounter();
+    vkb_flip();
+    V.pc_flip += SDL_GetPerformanceCounter() - t0;
+}
+
+static const Nv2aBackend s_vk_backend_perf = { perf_clear, perf_draw, perf_flip, vkb_idle,
+                                                perf_draw_program };
+
 /* ---- the window on the process main thread ------------------------------ */
 
 extern void xbox_InputSetMainPump(int on);    /* src/input/xinput_device.c */
@@ -3332,7 +3385,7 @@ int amped2_vk_host_main(int (*guest_main)(void))
 
 int amped2_vk_register(void)
 {
-    nv2a_backend_register(&s_vk_backend);
+    nv2a_backend_register(getenv("AMPED2_VK_PERF") ? &s_vk_backend_perf : &s_vk_backend);
     fprintf(stderr, "  [VK] Vulkan back end registered (starts on the first frame)\n");
     return 0;
 }
