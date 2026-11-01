@@ -139,8 +139,9 @@ Backlog (chosen 2026-10-20):
   - [x] Native HD widescreen (2026-10-30): the game's own 720p mode (runtime patch 0004 grants the HD permissions)
         with its 16:9 HUD layout; 21:9 through a camera aspect hook, culling for the full width (NTSC-U)
   - [ ] The game's 720p menus are stretched (4:3 art, as on the Xbox): text and pictures at their own proportions
-  - [x] 21:9: the level-select menu's 3D flyover filled the full width beside the menu's 16:9 frame – menus with a
-        3D scene are pillarboxed now (rides told apart by the ride camera's update, NTSC-U)
+  - [x] 21:9: the level-select menu's 3D flyover filled the full width beside the menu's 16:9 frame – a menu with
+        a frame of its own (a 2D overlay across the full width) is pillarboxed now; rides (told apart by the ride
+        camera's update, NTSC-U) and scenes with a floating panel (the challenge card) use the full width
   - [ ] HUD/UI correction for wider than 16:9 (edge-anchored elements instead of the 16:9 middle)
   - [ ] FOV slider (on top of the Hor+ aspect-ratio change)
   - [ ] VSync on/off/adaptive, frame limiter options, FPS / frame-time overlay

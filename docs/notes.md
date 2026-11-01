@@ -715,3 +715,8 @@ _(date – what was done, what was found, next step)_
     program alone), built on a worker thread (30-100 ms each, ~32 per session) while the generic pipeline draws ->
     105 fps (GPU 6.7 ms). Building them on the render thread stalled the game and its sound.
   - A ride at 4x: ~85 -> 118 fps; at 2x 137 fps, CPU-bound now (GPU 37 %): texture re-validation is next.
+  - Then the challenge card (a panel floating over the mountain scene) was pillarboxed too, but should be full width:
+    it updates the same camera as the level select (0x0010D8BD), and the guest call chains of that update are the
+    same on both screens. What tells them apart is the menu's own frame: the level select (like career, map,
+    loading) draws a 2D overlay across the full width (its bands, a full background). `wide_view()`: a ride, or no
+    such overlay in the last frame -> full width; otherwise the middle with black bars.

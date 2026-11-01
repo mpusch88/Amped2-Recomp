@@ -238,6 +238,7 @@ static struct {
     uint32_t          scale;               /* resolution scale (settings) */
     double            aspect;              /* the aspect ratio setting, width / height */
     int               scissor_mid;         /* scissor is the un-widened middle (set_scissor) */
+    int               band_cur, band_prev; /* a full-width 2D overlay this / last frame (wide_view) */
     uint32_t          shown_va[4];         /* surfaces the title has flipped */
     uint32_t          rt_flip;             /* last flip with draws off screen, +1 */
     VkPresentModeKHR  present_mode;
@@ -2552,9 +2553,11 @@ static int hud_clip(void)
 /* A menu on a widened back buffer is presented as its middle (present), so
  * nothing outside it is drawn: at a high resolution scale the sides of a
  * menu's 3D scene were a third of the frame's GPU time. */
+static int wide_view(void);
+
 static int menu_middle(const VkbSurface *s)
 {
-    return s->wide && !in_ride();
+    return s->wide && !wide_view();
 }
 
 /* Whether the batch's colour target is a widened back buffer. */
@@ -2619,6 +2622,16 @@ static void vkb_draw(const Nv2aSurface *g, const Nv2aBatch *b)
     apply_state(b->state);
     draw_frag_state(b, &c);
     overlay = c.s->wide && overlay_2d(b);
+    if (overlay && !V.band_cur) {
+        /* A menu frame: a 2D overlay across (nearly) the whole screen width. */
+        float x0 = 1e9f, x1 = -1e9f;
+        uint32_t i;
+        for (i = 0; i < b->count; i++) {
+            if (b->vertices[i].x < x0) x0 = b->vertices[i].x;
+            if (b->vertices[i].x > x1) x1 = b->vertices[i].x;
+        }
+        V.band_cur = x0 <= 0.02f * (float)c.s->gw && x1 >= 0.98f * (float)c.s->gw;
+    }
     if (fullscreen)
         c.pc.x3d = 1.0f;                        /* full-screen fade: edge to edge */
     else if (camera_wide(c.s) && !overlay)
@@ -2816,13 +2829,24 @@ static int in_ride(void)
     return V.rt_flip && V.flips + 1 - V.rt_flip < 30;
 }
 
+/* Whether a widened back buffer is shown at its full width: a ride, or a
+ * screen without a frame of its own -- a 3D scene with a panel floating over
+ * it (the challenge card). A menu with its own frame (a 2D overlay across the
+ * whole width: the level select's bands, a full background) is shown as its
+ * middle with black bars, and only that middle is drawn (menu_middle). The
+ * last frame's overlays decide, so a screen change shows one frame late. */
+static int wide_view(void)
+{
+    return in_ride() || !V.band_prev;
+}
+
 /* The logical (title-visible) size of the surface, scaled to fit the window
  * with its aspect kept; the rest of the window stays black. */
 static void fit_rect(const VkbSurface *s, VkOffset3D out[2])
 {
     double sw = (double)V.swap_extent.width, sh = (double)V.swap_extent.height;
     double aspect = (double)s->logical_w / (double)s->logical_h
-                  * (s->wide && in_ride() ? s->widen : 1.0);
+                  * (s->wide && wide_view() ? s->widen : 1.0);
     double w = sw, h = sw / aspect;
 
     if (h > sh) { h = sh; w = sh * aspect; }
@@ -3050,6 +3074,8 @@ static void present(int real_flip)
     }
     if (real_flip) {
         V.last_frame_draws = V.frame_draws;
+        V.band_prev = V.band_cur;
+        V.band_cur = 0;
         V.frame_draws = 0;
     }
     if (V.swap_dirty) {
@@ -3104,13 +3130,14 @@ static void present(int real_flip)
         blit.srcOffsets[1].z = 1;
         if (s->wide && real_flip) {
             static int was = -1;
-            if (was != in_ride()) {
-                was = in_ride();
+            if (was != wide_view()) {
+                was = wide_view();
                 fprintf(stderr, "  [VK] flip %u: presenting %s\n", V.flips,
-                        was ? "wide (ride)" : "the middle (menu)");
+                        was ? (in_ride() ? "wide (ride)" : "wide (a scene without a menu frame)")
+                            : "the middle (menu)");
             }
         }
-        if (s->wide && !in_ride()) {
+        if (s->wide && !wide_view()) {
             /* A menu on a widened surface: its un-widened middle. */
             int32_t mid_w = (int32_t)((double)s->width / s->widen + 0.5);
             blit.srcOffsets[0].x = ((int32_t)s->width - mid_w) / 2;
