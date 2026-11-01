@@ -720,3 +720,23 @@ _(date – what was done, what was found, next step)_
     same on both screens. What tells them apart is the menu's own frame: the level select (like career, map,
     loading) draws a 2D overlay across the full width (its bands, a full background). `wide_view()`: a ride, or no
     such overlay in the last frame -> full width; otherwise the middle with black bars.
+
+- 2026-10-31 – **21:9 menu bars, interface models, frame capture** (perf/4x-menus).
+  - The challenge card started pillarboxed and turned wide ~50 frames later: the text scrolling across it counted as
+    a menu frame. Measured extents at 1280: front-end backgrounds -1.4..1280.5, the level select's bands -9.9..1288.9,
+    the scrolling text far past both edges -> a menu frame starts and ends within 16 px of the edges.
+  - The sides flashed up at fades between menus (no menu frame for 4-5 frames) and at level loads (a few frames far
+    apart): bars come at once, but go only after 6 frames and 100 ms without a menu frame. Two runs through the
+    route: one switch each, at the challenge card. The SD mode (`AMPED2_HD=0`) behaves the same (user + dumps).
+  - Results screen: a coin landed beside its slot (user screenshot). `AMPED2_VK_CAPTURE` (new, F10) showed it as the
+    one textured, depth-writing 3D draw among the panel's 2D overlays, widened by 1.3125 like the world: the game
+    projects it for the 16:9 screen, not with the widened ride camera. On full-width screens such a model, drawn
+    after the frame's 2D overlays started, is narrowed like the panel (`ui_model`); the ride's untextured spin ring
+    keeps the widening, and so does the main menu's rider preview (a pillarboxed menu). The challenge cards' coin
+    bullets were the same case. User-verified on the results screen and the sponsor card.
+  - A capture with the vertex programs declined to the executor's CPU transform lost the interface draws (the CPU
+    path produces degenerate/NaN positions for those programs): positions of program batches stay unknown in
+    captures.
+  - CPU split at 2x in a ride (`AMPED2_VK_PERF` cpu line): back end ~2.5 ms per frame, runtime decode ~2.3 ms, the
+    rest is waiting for the 144 Hz vsync -- 2x is at the refresh cap. Render-target scale (512 -> 2048 at 4x) and
+    the depth format (D24S8 already) cost nothing measurable.

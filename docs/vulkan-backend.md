@@ -54,7 +54,7 @@ available as the reference (`AMPED2_RENDERER=cpu`) for comparison dumps; the Vul
 2. ✅ Triangles with vertex colour + texture stage 0, blend/depth/stencil/alpha test. 60 fps title/menu.
 3. ✅ Interface extension + combiner uber-shader + multitexturing. Race 55–60 fps (with the vertex cache and
    pre-decoded vertex programs in the runtime patch).
-4. Render-to-texture checks, AA/resolution, per-triangle culling, frames in flight. Windows ✅ – with SDL2 there too
+4. Render-to-texture checks, AA/resolution, per-triangle culling. Frames in flight ✅ (two). Windows ✅ – with SDL2 there too
    (submodule `third_party/SDL`, linked statically; guest thread via SDL threads, `Sleep(0)` instead of
    `sched_yield`), so no separate Win32 surface code.
 
@@ -87,7 +87,25 @@ available as the reference (`AMPED2_RENDERER=cpu`) for comparison dumps; the Vul
   pushed past the surface (`covers_guest_screen`).
 - **Render-to-texture lookup** needs the surface's size and an uncompressed format, not only the address (surfaces
   outlive their use and memory is reused).
-- Diagnostics: `AMPED2_VK_TEXDUMP=<prefix>` writes decoded textures as BMP.
+- Diagnostics: `AMPED2_VK_TEXDUMP=<prefix>` writes decoded textures as BMP. `AMPED2_VK_PERF=1` logs a `[PERF]` pair
+  every 5 s: GPU time per frame (timestamps; the presenting part separately), the CPU's wait for the GPU and the
+  frame interval, and the CPU time per back-end entry (draw, texture lookups, vertex-program draws, clear, flip).
+  `AMPED2_VK_CAPTURE=<prefix>` makes F10 (or `AMPED2_VK_CAPTURE_FLIP=<n>`) capture one frame: a line per draw
+  (2D/3D, positions, depth, widening, textures), the frame's camera updates and the frame as BMP.
+  `AMPED2_VK_NO_SPEC=1`: the generic combiner pipeline only.
+- **Performance at high resolution scales** (21:9 4x: 6720x2880 back buffers): the combiner registers are plain
+  variables (a dynamically indexed array lived in local memory); two frames in flight (command buffer, fence,
+  acquire semaphore, vertex/staging rings and timestamp pool per slot; images freed mid-run wait for the device to
+  go idle); each combiner program gets its own pipeline with the program as specialization constants (`SPEC` in
+  nv2a.frag, `pipeline_for`), built by a worker thread while the generic pipeline draws. Main menu at 4x 24 -> 105
+  fps, rides ~85 -> 118 fps. What is left is mostly combiner work (7.2 of 9 ms per frame at 4x).
+- **21:9 menus**: `in_ride()` follows the ride's camera update (NTSC-U `AMPED2_RIDE_CAMERA_CALL`, the last camera
+  update decides; PAL: draws into an off-screen target). `wide_view()`: a ride, or a screen without a menu frame of
+  its own (a 2D overlay from screen edge to edge, within 16 px), is shown at the full width; other menus as the
+  middle with black bars, clipped to it (`menu_middle`). Bars come at once but go only after 6 frames and 100 ms
+  without a menu frame (fades, level loads). Textured, depth-writing 3D drawn after the frame's 2D overlays started
+  on a full-width screen is an interface model (the coins of the results screen and the challenge cards) and is
+  narrowed like the panel (`ui_model`).
 - **Native HD widescreen**: in the game's 720p mode the back buffers are 1280x720. Widening is per surface, from its
   own shape (`VkbSurface.widen`: 4:3 SD → 1.75 at 21:9, 16:9 HD → 1.3125). With the camera aspect hook active
   (`g_amped2_camera_aspect`, src/recomp_manual.c) the game already renders the full width squeezed into 1280 pixels:

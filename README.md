@@ -34,7 +34,7 @@ Windows, both with the Vulkan renderer; macOS later.
 | Rider shadow, steady 60 fps | ⬜ |
 | Music without dropouts (DirectSound DPC race fixed), proper stereo downmix | ✅ |
 | Releases: [v0.1.0, v0.2.0](https://github.com/bertibertig/Amped2-Recomp/releases) (Linux x86-64, Windows preview) | ✅ |
-| Windows (native build, MinGW / llvm-mingw): Vulkan renderer, saves, soundtrack; ~40-110 fps in rides (Windows 11, RTX 4070 SUPER) | ✅ |
+| Windows (native build, MinGW / llvm-mingw): Vulkan renderer, saves, soundtrack; rides ~110-145 fps at 2x-4x and 21:9 (Windows 11, RTX 4070 SUPER, 144 Hz) | ✅ |
 
 Plan and open items: [docs/TODO.md](docs/TODO.md), running log: [docs/notes.md](docs/notes.md).
 
@@ -182,7 +182,7 @@ Enter saves and starts, S saves, Q quits. The choices are saved in `~/.config/am
 | Category | Options |
 |---|---|
 | Resolution Scaling | Internal resolution 1x-5x: multiples of 640x480 at 4:3, of 1280x720 in the 720p mode (2x is 2560x1440) |
-| Aspect Ratio | 4:3 (original, the Xbox's 640x480) or wider: 16:9, 16:10 and 21:9 use the game's own 720p widescreen mode – a wider view the game also culls for (no objects vanishing at the sides), its 16:9 HUD layout, sharper. 21:9 widens it further (the HUD stays 16:9 in the middle); 16:10 shows it with thin bars above and below. The game's own 720p menus are drawn stretched, as on the Xbox |
+| Aspect Ratio | 4:3 (original, the Xbox's 640x480) or wider: 16:9, 16:10 and 21:9 use the game's own 720p widescreen mode – a wider view the game also culls for (no objects vanishing at the sides), its 16:9 HUD layout, sharper. 21:9 widens it further (the HUD stays 16:9 in the middle); 16:10 shows it with thin bars above and below. Wider than 16:9, a menu with its own frame (career, level select) is shown 16:9 with black bars at the sides; rides and the challenge cards over the 3D scene use the full width. The game's own 720p menus are drawn stretched, as on the Xbox |
 | Framerate | Original (60 fps) or unlocked, with a limit: the monitor's refresh rate (vsync), 60-360 fps or none. The game runs on its own clock, so gameplay speed does not change |
 | Display | Windowed, fullscreen or borderless fullscreen, and the monitor to use. Alt+Enter or F11 switch in the game; the mode and monitor you leave it in are saved |
 
@@ -190,8 +190,10 @@ The 720p mode is on by default for the NTSC-U disc. On PAL it is off: the camera
 not located there yet; `AMPED2_HD=1` forces the 720p mode anyway (untested on a PAL disc; 16:9 culling, 21:9
 widened from it), `AMPED2_HD=0` turns it off on NTSC-U.
 
-How high an unlocked frame rate gets depends on the CPU: on a ride it is about 90-120 fps for now (menus several
-hundred), the guest code and the NV2A thread are the limit, not the GPU. One run can override the file with
+How high an unlocked frame rate gets depends on the resolution scale: on Windows 11 with an RTX 4070 SUPER a ride
+reaches the 144 Hz refresh limit at 2x and runs at about 110-145 fps at 4x (21:9). At high scales the GPU is the
+limit (the Xbox's register combiners, compiled per combiner program), at 1x-2x the CPU (the guest code and the NV2A
+thread). One run can override the file with
 environment variables, e.g. `AMPED2_RESOLUTION_SCALE=3 AMPED2_ASPECT_RATIO=21:9 scripts/run.sh`
 (`AMPED2_FRAMERATE`, `AMPED2_FRAME_LIMIT`, `AMPED2_WINDOW_MODE`, `AMPED2_DISPLAY`; `AMPED2_SETTINGS=<file>` uses
 another file, `AMPED2_GAME_DIR` the game folder). The Vulkan renderer only; the CPU renderer ignores resolution and

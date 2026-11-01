@@ -112,9 +112,10 @@ First batch (done 2026-10-20, `amped2_recomp --settings` / `scripts/run.sh --set
 - [x] Aspect ratio: 4:3, 16:9, 16:10, 21:9 – Hor+ in rides, HUD kept 4:3 in the middle, menus and movies 4:3
 - [x] Framerate: real unlock (the game runs on QueryPerformanceCounter time), limit = display refresh / fixed / none
 - [x] Window mode: windowed, fullscreen, borderless fullscreen + display selection, Alt+Enter / F11 in game
-- [ ] Ride frame rate is CPU-bound at ~85-115 fps (menus 200-800): the guest spins in D3D (`sub_0031EA90`, 22 %)
-      waiting for the NV2A thread – pushbuffer decode (`nv2a_pb_exec_method` 11 %, `note` 4 %), texture
-      re-validation hashing (`hash_guest_texture` 7 %, ~1 GB/s). Needed for 144-270 fps on the slope.
+- [ ] Frame rate (2026-10-31, 21:9, RTX 4070 SUPER, `AMPED2_VK_PERF`): at 2x rides reach the 144 Hz cap; the CPU
+      side is ~2.5 ms of back end (vertex programs ~1.4, texture lookups/hashing ~0.9) and ~2.3 ms runtime decode per
+      frame. At 4x rides run 110-145 fps, GPU-bound: the specialised combiner shaders are ~75 % of the GPU frame
+      (7.2 ms vs 1.9 ms without combiners) – fewer texture fetches, early depth, a persisted pipeline cache.
 - [x] Ride/menu detection (in_ride() in vk_backend.c): NTSC-U by the ride's camera update (call site 0x00244912,
       the last camera update decides – a paused ride stays a ride); PAL still guesses by draws into an off-screen
       target (the splash screen counts as a ride for ~30 flips, and in the 720p mode the 3D menus would too)
@@ -135,13 +136,18 @@ Backlog (chosen 2026-10-20):
   - [ ] High-resolution rider shadow map with PCF (depends on the D16 shadow-map item in Phase 2)
   - [ ] LOD bias / model LOD / draw and fog distance (needs game-side research)
   - [ ] Texture filter override (force linear/trilinear, keep-original option)
+  - [ ] Mipmaps: textures are uploaded with level 0 only (sampler maxLod 0) while the Xbox used the stored levels –
+        distant textures shimmer more than on the console; decode/upload the levels (or blit them)
 - Display and widescreen
   - [x] Native HD widescreen (2026-10-30): the game's own 720p mode (runtime patch 0004 grants the HD permissions)
         with its 16:9 HUD layout; 21:9 through a camera aspect hook, culling for the full width (NTSC-U)
   - [ ] The game's 720p menus are stretched (4:3 art, as on the Xbox): text and pictures at their own proportions
   - [x] 21:9: the level-select menu's 3D flyover filled the full width beside the menu's 16:9 frame – a menu with
         a frame of its own (a 2D overlay across the full width) is pillarboxed now; rides (told apart by the ride
-        camera's update, NTSC-U) and scenes with a floating panel (the challenge card) use the full width
+        camera's update, NTSC-U) and scenes with a floating panel (the challenge card) use the full width; no
+        flashing sides at fades and level loads; the same in the SD mode (`AMPED2_HD=0`)
+  - [x] 21:9: the coins of the results screen and the challenge cards' coin bullets landed beside their places –
+        3D interface models are narrowed like the panel around them
   - [ ] HUD/UI correction for wider than 16:9 (edge-anchored elements instead of the 16:9 middle)
   - [ ] FOV slider (on top of the Hor+ aspect-ratio change)
   - [ ] VSync on/off/adaptive, frame limiter options, FPS / frame-time overlay
