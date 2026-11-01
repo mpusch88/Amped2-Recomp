@@ -2589,11 +2589,13 @@ static int menu_middle(const VkbSurface *s)
  * for the 16:9 screen, not the widened ride camera, so it is narrowed into
  * the middle like the panel around it instead of widened (it landed beside its
  * slot). The ride's untextured spin ring, also drawn after the HUD started,
- * comes from the ride camera and stays widened. Rides only: the main menu's
- * rider preview (a widened camera) is drawn after its 2D background. */
+ * comes from the ride camera and stays widened. Only on screens shown at the
+ * full width (rides, and scenes like the challenge cards with the coin icons
+ * at their left): a pillarboxed menu's 3D -- the main menu's rider preview,
+ * a widened camera -- is drawn after its 2D background. */
 static int ui_model(const Nv2aBatch *b, const VkbDrawCtx *c)
 {
-    return V.ui_started && in_ride() && b->state->depth_test_enable && b->state->depth_write
+    return V.ui_started && wide_view() && b->state->depth_test_enable && b->state->depth_write
         && c->stex[0];
 }
 
