@@ -102,8 +102,9 @@ available as the reference (`AMPED2_RENDERER=cpu`) for comparison dumps; the Vul
 - **21:9 menus**: `in_ride()` follows the ride's camera update (NTSC-U `AMPED2_RIDE_CAMERA_CALL`, the last camera
   update decides; PAL: draws into an off-screen target). `wide_view()`: a ride, or a screen without a menu frame of
   its own (a 2D overlay from screen edge to edge, within 16 px), is shown at the full width; other menus as the
-  middle with black bars, clipped to it (`menu_middle`). Bars come at once but go only after 6 frames and 100 ms
-  without a menu frame (fades, level loads). Textured, depth-writing 3D drawn after the frame's 2D overlays started
+  middle with black bars, clipped to it (`menu_middle`). Bars come with the next frame but go only after 6 frames
+  and 100 ms without a menu frame (fades, level loads); decided once per frame after it was presented
+  (`band_frame_end`), so a frame's draws, interface models and presentation agree. Textured, depth-writing 3D drawn after the frame's 2D overlays started
   on a full-width screen is an interface model (the coins of the results screen and the challenge cards) and is
   narrowed like the panel (`ui_model`).
 - **Native HD widescreen**: in the game's 720p mode the back buffers are 1280x720. Widening is per surface, from its

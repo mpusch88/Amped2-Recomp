@@ -740,3 +740,7 @@ _(date – what was done, what was found, next step)_
   - CPU split at 2x in a ride (`AMPED2_VK_PERF` cpu line): back end ~2.5 ms per frame, runtime decode ~2.3 ms, the
     rest is waiting for the 144 Hz vsync -- 2x is at the refresh cap. Render-target scale (512 -> 2048 at 4x) and
     the depth format (D24S8 already) cost nothing measurable.
+  - Review: the bar state changed at the start of present() and wide_view() read the clock per draw, so a frame's
+    draws and its presentation could disagree when the bars went away. It is decided once per frame after
+    presenting now (`band_frame_end`; exact time + flag, unsigned comparison), bars on from the start. Route three
+    times: one switch each. Linux (Docker) CI + full build pass at 25d178c.
