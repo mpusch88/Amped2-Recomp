@@ -293,6 +293,8 @@ void amped2_boot_movie(const char *which, const char *skip_env, void (*play)(voi
  * amped2_ride_camera_call: not known for this build. */
 volatile float g_amped2_camera_aspect;
 volatile int g_amped2_ride_camera;
+uint32_t g_amped2_cam_log[32][3];           /* camera, caller, aspect bits (before the hook) */
+volatile unsigned g_amped2_cam_log_n;
 const unsigned amped2_ride_camera_call = AMPED2_RIDE_CAMERA_CALL;
 
 void amped2_camera_aspect_hook(void)
@@ -302,6 +304,12 @@ void amped2_camera_aspect_hook(void)
 
     if (AMPED2_RIDE_CAMERA_CALL)
         g_amped2_ride_camera = MEM32(g_esp) == AMPED2_RIDE_CAMERA_CALL;
+    {   /* the last camera updates, for the renderer's frame capture (AMPED2_VK_CAPTURE) */
+        unsigned k = g_amped2_cam_log_n++ % 32;
+        g_amped2_cam_log[k][0] = cam;
+        g_amped2_cam_log[k][1] = MEM32(g_esp);
+        g_amped2_cam_log[k][2] = cam ? MEM32(cam + 0x184) : 0;
+    }
 
     if (target < 0.0f) {
         const char *off = getenv("AMPED2_HD_CAMERA");

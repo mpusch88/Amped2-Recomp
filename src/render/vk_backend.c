@@ -242,6 +242,7 @@ static struct {
     double            aspect;              /* the aspect ratio setting, width / height */
     int               scissor_mid;         /* scissor is the un-widened middle (set_scissor) */
     int               band_cur;            /* a full-width 2D overlay in this frame (wide_view) */
+    int               ui_started;          /* a 2D overlay drawn in this frame (ui_model) */
     uint32_t          band_ms;             /* SDL ticks of the last frame that had one, 0 never */
     uint32_t          band_gap;            /* frames since then */
     uint32_t          shown_va[4];         /* surfaces the title has flipped */
@@ -297,6 +298,12 @@ static struct {
     uint32_t          title_ms, title_flips;   /* window-title FPS counter */
 
     const char       *dump_prefix;
+    /* AMPED2_VK_CAPTURE=<prefix>: F10 writes the next frame's draws to
+     * <prefix><flip>.txt and the frame to <prefix><flip>.bmp (capture_*). */
+    const char       *cap_prefix;
+    volatile int      cap_req;
+    FILE             *cap_f;
+    unsigned          cap_cam0;            /* g_amped2_cam_log_n at the capture's start */
     uint32_t          dump_every;
 
     /* The NV2A video overlay (movies), composed on top at present time. */
@@ -1116,6 +1123,11 @@ static int window_event(const SDL_Event *ev)
         toggle_fullscreen();
         return 1;
     }
+    if (ev->type == SDL_KEYDOWN && !ev->key.repeat && ev->key.keysym.sym == SDLK_F10
+            && V.cap_prefix) {
+        V.cap_req = 1;                      /* the next frame: capture_frame_start */
+        return 1;
+    }
     return 0;
 }
 
@@ -1210,6 +1222,7 @@ static int init_vulkan(void)
     fprintf(stderr, "  [VK] internal resolution %ux, aspect ratio %s\n", V.scale,
             amped2_aspect_name(g_amped2_settings.aspect_ratio));
     V.dump_prefix = getenv("AMPED2_VK_DUMP");
+    V.cap_prefix = getenv("AMPED2_VK_CAPTURE");
     e = getenv("AMPED2_VK_DUMP_EVERY");
     V.dump_every = e && atoi(e) > 0 ? (uint32_t)atoi(e) : 60;
     return 1;
@@ -2570,6 +2583,53 @@ static int menu_middle(const VkbSurface *s)
     return s->wide && !wide_view();
 }
 
+/* A 3D model that belongs to the interface: drawn after the frame's 2D
+ * overlays have started, textured and writing depth -- the dollar/film coins
+ * spinning into the results panel. The game draws it with its own projection
+ * for the 16:9 screen, not the widened ride camera, so it is narrowed into
+ * the middle like the panel around it instead of widened (it landed beside its
+ * slot). The ride's untextured spin ring, also drawn after the HUD started,
+ * comes from the ride camera and stays widened. Rides only: the main menu's
+ * rider preview (a widened camera) is drawn after its 2D background. */
+static int ui_model(const Nv2aBatch *b, const VkbDrawCtx *c)
+{
+    return V.ui_started && in_ride() && b->state->depth_test_enable && b->state->depth_write
+        && c->stex[0];
+}
+
+/* One line per draw of a captured frame (AMPED2_VK_CAPTURE, F10): where it
+ * lands and how it is treated -- 2D overlay or 3D, widened (x3d 1) or
+ * narrowed into the middle, clipped to the middle. Program batches have no
+ * CPU vertices (b->count 0). */
+static void capture_draw(const char *kind, const VkbDrawCtx *c, const Nv2aBatch *b,
+                         uint32_t n, int overlay, int fullscreen)
+{
+    float x0 = 0, x1 = 0, y0 = 0, y1 = 0, r0 = 0, r1 = 0;
+    uint32_t i;
+
+    if (!V.cap_f)
+        return;
+    if (b->count) {
+        x0 = y0 = r0 = 1e9f;
+        x1 = y1 = r1 = -1e9f;
+        for (i = 0; i < b->count; i++) {
+            const Nv2aVertex *v = &b->vertices[i];
+            if (v->x < x0) x0 = v->x;
+            if (v->x > x1) x1 = v->x;
+            if (v->y < y0) y0 = v->y;
+            if (v->y > y1) y1 = v->y;
+            if (v->rhw < r0) r0 = v->rhw;
+            if (v->rhw > r1) r1 = v->rhw;
+        }
+    }
+    fprintf(V.cap_f, "%s surf %08X%s n %u depth %d/%d blend %d | x %.1f..%.1f y %.1f..%.1f rhw %.4f..%.4f"
+            " | overlay %d fullscreen %d x3d %.3f mid %d | tex0 %08X %ux%u rc %d\n",
+            kind, c->s->va, c->s->wide ? " wide" : "", n, b->state->depth_test_enable,
+            b->state->depth_write, b->state->blend_enable, x0, x1, y0, y1, r0, r1, overlay,
+            fullscreen, (double)c->pc.x3d, V.scissor_mid, c->stex[0] ? c->stex[0]->offset : 0,
+            c->stex[0] ? c->stex[0]->width : 0, c->stex[0] ? c->stex[0]->height : 0, c->use_rc);
+}
+
 /* Whether the batch's colour target is a widened back buffer. */
 static int target_wide(const Nv2aSurface *g)
 {
@@ -2632,6 +2692,8 @@ static void vkb_draw(const Nv2aSurface *g, const Nv2aBatch *b)
     apply_state(b->state);
     draw_frag_state(b, &c);
     overlay = c.s->wide && overlay_2d(b);
+    if (overlay)
+        V.ui_started = 1;
     if (overlay && !V.band_cur) {
         /* A menu frame: a 2D overlay spanning the screen from edge to edge --
          * the front-end backgrounds (x -1.4 .. 1280.5 at 1280), the level
@@ -2647,9 +2709,10 @@ static void vkb_draw(const Nv2aSurface *g, const Nv2aBatch *b)
     }
     if (fullscreen)
         c.pc.x3d = 1.0f;                        /* full-screen fade: edge to edge */
-    else if (camera_wide(c.s) && !overlay)
+    else if (camera_wide(c.s) && !overlay && !ui_model(b, &c))
         c.pc.x3d = 1.0f;                        /* the game's own wide view: stretched back */
     set_scissor(c.s, menu_middle(c.s) || (!fullscreen && overlay && in_ride() && hud_clip()));
+    capture_draw("cpu ", &c, b, b->count, overlay, fullscreen);
     vkCmdPushDescriptorSetKHR(V.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V.pipe_layout,
                               0, VKB_NBIND, c.w);
     vkCmdPushConstants(V.cmd, V.pipe_layout,
@@ -2774,9 +2837,10 @@ static int vkb_draw_program(const Nv2aSurface *g, const Nv2aBatch *b,
     bind_pipeline(c.use_rc ? pipeline_for(1) : V.pipeline_vsh);
     apply_state(b->state);
     draw_frag_state(b, &c);
-    if (camera_wide(c.s))
+    if (camera_wide(c.s) && !ui_model(b, &c))
         c.pc.x3d = 1.0f;                    /* the game's own wide view: stretched back */
     set_scissor(c.s, menu_middle(c.s));     /* 3D: the whole widened surface in rides */
+    capture_draw("prog", &c, b, p->index_count, 0, 0);
     {
         static const uint32_t bindings[4] = { VKB_BIND_VCONST, VKB_BIND_VPROG,
                                               VKB_BIND_VATTR, VKB_BIND_VDATA };
@@ -3076,6 +3140,7 @@ static void present(int real_flip)
     VkSubmitInfo si;
     VkPresentInfoKHR pi;
     VkbSurface *s;
+    int capture_dump = 0;
 
     if (!ensure_ready())
         return;
@@ -3099,6 +3164,42 @@ static void present(int real_flip)
     }
     if (real_flip) {
         V.last_frame_draws = V.frame_draws;
+        if (V.cap_f) {                      /* the captured frame is complete */
+            extern uint32_t g_amped2_cam_log[32][3];
+            extern volatile unsigned g_amped2_cam_log_n;
+            unsigned k, end = g_amped2_cam_log_n;
+            for (k = end > V.cap_cam0 + 32 ? end - 32 : V.cap_cam0; k < end; k++) {
+                float a;
+                memcpy(&a, &g_amped2_cam_log[k % 32][2], 4);
+                fprintf(V.cap_f, "camera update: cam %08X from %08X aspect %.4f\n",
+                        g_amped2_cam_log[k % 32][0], g_amped2_cam_log[k % 32][1], (double)a);
+            }
+            fclose(V.cap_f);
+            V.cap_f = NULL;
+            capture_dump = 1;
+        }
+        if (V.cap_prefix) {                 /* AMPED2_VK_CAPTURE_FLIP=n: capture flip n without F10 */
+            static long at = -1;
+            if (at < 0) {
+                const char *e = getenv("AMPED2_VK_CAPTURE_FLIP");
+                at = e ? atol(e) : 0;
+            }
+            if (at && (long)V.flips + 1 == at)
+                V.cap_req = 1;
+        }
+        if (V.cap_req && V.cap_prefix) {
+            char path[512];
+            V.cap_req = 0;
+            snprintf(path, sizeof path, "%s%06u.txt", V.cap_prefix, V.flips + 1);
+            if ((V.cap_f = fopen(path, "w")) != NULL) {
+                extern volatile unsigned g_amped2_cam_log_n;
+                V.cap_cam0 = g_amped2_cam_log_n;
+                fprintf(V.cap_f, "flip %u: ride %d, wide view %d, camera aspect %.3f, menu frame %d ms ago\n",
+                        V.flips + 1, in_ride(), wide_view(), (double)g_amped2_camera_aspect,
+                        V.band_ms ? (int)(SDL_GetTicks() - V.band_ms) : -1);
+                fprintf(stderr, "  [VK] capturing flip %u to %s\n", V.flips + 1, path);
+            }
+        }
         if (V.band_cur) {
             V.band_ms = SDL_GetTicks() | 1;  /* 0 means never */
             V.band_gap = 0;
@@ -3106,6 +3207,7 @@ static void present(int real_flip)
             V.band_gap++;
         }
         V.band_cur = 0;
+        V.ui_started = 0;
         V.frame_draws = 0;
     }
     if (V.swap_dirty) {
@@ -3218,6 +3320,12 @@ static void present(int real_flip)
 
     if (real_flip && V.dump_prefix && s && V.flips % V.dump_every == 0)
         dump_surface(s);
+    if (capture_dump && s) {
+        const char *keep = V.dump_prefix;
+        V.dump_prefix = V.cap_prefix;
+        dump_surface(s);
+        V.dump_prefix = keep;
+    }
 }
 
 static void vkb_flip(void)
