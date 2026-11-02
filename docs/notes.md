@@ -763,3 +763,8 @@ _(date – what was done, what was found, next step)_
   files read as LF – a Windows checkout has them as CRLF) and compares the working tree with it; an untouched
   submodule gets the series in order. Tested: the patched submodule (no warning), a fresh one (applied, then
   recognised, second run quiet).
+- 2026-11-02 – **Patch 0005 folded into 0001.** 0005 corrected the dispatch lock and APU code that 0001 introduces
+  (kernel_hal.c, apu_vp.c, apu_core.c), so it only applied on top of 0001 and could not be checked, dropped or
+  upstreamed on its own. 0001 now carries the corrected code; 0002-0004 each apply to upstream + 0001 on their own
+  again. The resulting runtime sources are byte-identical to 0001+0005 (checked). SSX3-Recomp shares 0001 and gets
+  the fixes with it.

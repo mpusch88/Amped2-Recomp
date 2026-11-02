@@ -130,6 +130,25 @@ All of them are candidates for an upstream PR to sp00nznet/xboxrecomp.
   idle voice was ever reported, and DirectSound's waits for stopped voices ran into their 0.5 s timeout one after
   another (the results screen at 5-40 fps). `RECOMP_APU_IDLE_LOG=1` prints the idle-voice traps per voice every 5 s.
 
+- APU ISR dispatch lock, PIO mutex and FE trap preservation (2026-11-01, folded in from what was patch 0005 on
+  2026-11-02: it corrected code this patch introduces, so as a separate patch it only applied on top of 0001):
+  - `src/kernel/kernel_hal.c` (`xbox_IrqlEnterInterrupt`, `dispatch_lock_take`): device ISRs now acquire the dispatch
+    lock too. In `kernel_bridge.c`, `KeInsertQueueDpc` runs DPCs inline inside the APU ISR via `xbox_IrqlEnterInterrupt(2)`
+    while `g_current_irql` is already 16 and `t_in_isr` is 1, so `irql_track(16, 2)` never crossed the `DISPATCH_LEVEL`
+    boundary and `dispatch_lock_take` skipped `s_dispatch_cs`. DirectSound's stream DPC and the APU ISR itself therefore
+    ran without the dispatch lock concurrently with guest threads at `DISPATCH_LEVEL`, corrupting `NV_PAPU_FECV`
+    (sound-effect volume/format writes landing on stream voices -> loud distorted audio) and DirectSound's voice lists
+    (`core + 0x488`, `core + 0x4A0`, `NEXT_VOICE_HANDLE` -> freeze).
+  - `src/apu/apu_vp.c` (`mcpx_apu_vp_write`, `voice_lock`, `fe_method`): `mcpx_apu_vp_write` now holds `d->lock` around
+    `fe_method` so guest PIO writes do not race `mcpx_apu_vp_frame` on `d->regs`, `d->vp`, or non-atomic read-modify-writes
+    to voice structs in RAM; `fe_method` preserves `FEDECMETH`/`FEDECPARAM` while `FEMETHMODE_TRAPPED` is set so guest PIO
+    writes cannot clobber a latched `SE2FE_IDLE_VOICE` (`0x8000`) trap before the deferred ISR reads `0xFE801300`; handles
+    `NV1BA0_PIO_SYNCHRONIZE` (`0x104`, writing `NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS` to `FENADDR + 15`) and
+    `NV1BA0_PIO_SET_SE2FE_PROTECTION` (`0x10C`).
+  - `src/apu/apu_core.c` (`apu_deliver_irq`, `mcpx_apu_frame_thread`): removed the `++held_off <= 50` escape hatch that
+    forced APU ISR delivery while a guest thread was at `DISPATCH_LEVEL`, and only advance `d->sample_count` (SSL ticks)
+    when `!fe_trapped`.
+
 Verified: Linux build + Windows cross build (MinGW) compile; own decoder test (8 cases, ucontext) green;
 `tools.recomp.test_reserved_idents` green; SSX 3 on Linux reaches the same state as under Proton
 (APU/AC'97/DSP doorbell/APU interrupts, intro videos are opened).
@@ -172,21 +191,3 @@ Verified: Linux build + Windows cross build (MinGW) compile; own decoder test (8
   cable, so a title reads the permissions through XAPI without game-side overrides.
 - Off by default, so titles stay in their SD mode. Amped 2 sets it when its native HD widescreen is on.
   Generic: any title offering 480p/720p.
-
-## 0005 – APU ISR dispatch lock, PIO mutex, and FE trap preservation
-- `src/kernel/kernel_hal.c` (`xbox_IrqlEnterInterrupt`, `dispatch_lock_take`): device ISRs now acquire the dispatch
-  lock too. In `kernel_bridge.c`, `KeInsertQueueDpc` runs DPCs inline inside the APU ISR via `xbox_IrqlEnterInterrupt(2)`
-  while `g_current_irql` is already 16 and `t_in_isr` is 1, so `irql_track(16, 2)` never crossed the `DISPATCH_LEVEL`
-  boundary and `dispatch_lock_take` skipped `s_dispatch_cs`. DirectSound's stream DPC and the APU ISR itself therefore
-  ran without the dispatch lock concurrently with guest threads at `DISPATCH_LEVEL`, corrupting `NV_PAPU_FECV`
-  (sound-effect volume/format writes landing on stream voices -> loud distorted audio) and DirectSound's voice lists
-  (`core + 0x488`, `core + 0x4A0`, `NEXT_VOICE_HANDLE` -> freeze).
-- `src/apu/apu_vp.c` (`mcpx_apu_vp_write`, `voice_lock`, `fe_method`): `mcpx_apu_vp_write` now holds `d->lock` around
-  `fe_method` so guest PIO writes do not race `mcpx_apu_vp_frame` on `d->regs`, `d->vp`, or non-atomic read-modify-writes
-  to voice structs in RAM; `fe_method` preserves `FEDECMETH`/`FEDECPARAM` while `FEMETHMODE_TRAPPED` is set so guest PIO
-  writes cannot clobber a latched `SE2FE_IDLE_VOICE` (`0x8000`) trap before the deferred ISR reads `0xFE801300`; handles
-  `NV1BA0_PIO_SYNCHRONIZE` (`0x104`, writing `NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS` to `FENADDR + 15`) and
-  `NV1BA0_PIO_SET_SE2FE_PROTECTION` (`0x10C`).
-- `src/apu/apu_core.c` (`apu_deliver_irq`, `mcpx_apu_frame_thread`): removed the `++held_off <= 50` escape hatch that
-  forced APU ISR delivery while a guest thread was at `DISPATCH_LEVEL`, and only advance `d->sample_count` (SSL ticks)
-  when `!fe_trapped`.

@@ -1,5 +1,5 @@
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index 1f664a3..b04e924 100644
+index 1f664a3..ac66b40 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
 @@ -168,7 +168,8 @@ static int apu_mmio_trace(void)
@@ -12,7 +12,25 @@ index 1f664a3..b04e924 100644
      return on;
  }
  
-@@ -337,9 +338,15 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
+@@ -241,16 +242,14 @@ static void apu_deliver_irq(MCPXAPUState *d)
+      * thread is a new OS thread and needs its own TIB. g_fs_base itself
+      * cannot tell, as every thread starts at the main thread's TIB. */
+     static APU_TLS int tib_ready;
+-    static unsigned held_off;
+     uint32_t kint, routine, context;
+     apu_guest_fn fn;
+     int slot;
+ 
+     if (!InterlockedCompareExchange(&s_irq_line, 0, 0))
+         return;
+-    if (xbox_IrqlBlocksInterrupts() && ++held_off <= 50)
++    if (xbox_IrqlBlocksInterrupts())
+         return;
+-    held_off = 0;
+     kint = xbox_GetConnectedInterrupt(APU_VECTOR);
+     if (!kint)
+         return;
+@@ -337,9 +336,15 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
           * the title writes (0, so far, always) becomes the new start. */
          qatomic_set(&d->regs[addr], (uint32_t)val);
          d->sample_count = val;
@@ -28,7 +46,16 @@ index 1f664a3..b04e924 100644
          update_irq(d);
          qemu_cond_broadcast(&d->cond);
          break;
-@@ -1137,9 +1144,32 @@ static void *mcpx_apu_frame_thread(void *arg)
+@@ -1128,7 +1133,7 @@ static void *mcpx_apu_frame_thread(void *arg)
+          * reposting front-end commands -- is what lets the rest of
+          * DirectSound initialisation finish. Without the tick the title
+          * re-runs the sequencer setup forever and never gets past audio. */
+-        {
++        if (!fe_trapped) {
+             uint32_t sectl = qatomic_read(&d->regs[NV_PAPU_SECTL]);
+             uint32_t ssl = qatomic_read(&d->regs[NV_PAPU_SSL]);
+             d->sample_count += NUM_SAMPLES_PER_FRAME;
+@@ -1137,9 +1142,32 @@ static void *mcpx_apu_frame_thread(void *arg)
                      && (sectl & NV_PAPU_SECTL_XCNTMODE)
                             != NV_PAPU_SECTL_XCNTMODE_OFF) {
                  d->sample_count -= ssl;
@@ -289,7 +316,7 @@ index f4fca14..0f310a4 100644
      int ep_frame_div;
      int sleep_acc_us;
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
-index 128d86f..b9c5af9 100644
+index 128d86f..96bddaf 100644
 --- a/src/apu/apu_vp.c
 +++ b/src/apu/apu_vp.c
 @@ -47,6 +47,32 @@ static const struct {
@@ -325,10 +352,36 @@ index 128d86f..b9c5af9 100644
  static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
                                int status)
  {
-@@ -187,6 +213,39 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -146,7 +172,6 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
+ static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
+ {
+     assert(v < MCPX_HW_MAX_VOICES);
+-    qemu_mutex_lock(&d->lock);
  
-     d->regs[NV_PAPU_FEDECMETH] = method;
-     d->regs[NV_PAPU_FEDECPARAM] = argument;
+     uint64_t mask = 1ULL << (v % 64);
+     if (lock) {
+@@ -156,7 +181,6 @@ static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
+     }
+ 
+     qemu_cond_signal(&d->cond);
+-    qemu_mutex_unlock(&d->lock);
+ }
+ 
+ static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
+@@ -185,11 +209,61 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+ {
+     unsigned int slot;
+ 
+-    d->regs[NV_PAPU_FEDECMETH] = method;
+-    d->regs[NV_PAPU_FEDECPARAM] = argument;
++    /* Preserve a latched FE trap (e.g. SE2FE_IDLE_VOICE) until the ISR
++     * clears FEMETHMODE_TRAPPED; otherwise concurrent guest PIO writes
++     * clobber FEDECMETH/FEDECPARAM before the ISR reads them. */
++    if ((d->regs[NV_PAPU_FECTL] & NV_PAPU_FECTL_FEMETHMODE)
++            != NV_PAPU_FECTL_FEMETHMODE_TRAPPED) {
++        d->regs[NV_PAPU_FEDECMETH] = method;
++        d->regs[NV_PAPU_FEDECPARAM] = argument;
++    }
 +    {   /* RECOMP_APU_VOICE_LOG=<voice>: every method that names that voice --
 +         * while it is the current voice, or as the handle argument of the
 +         * voice methods below 0x200 (ON, OFF, RELEASE, PAUSE ...). A VOLA
@@ -365,7 +418,21 @@ index 128d86f..b9c5af9 100644
      unsigned int selected_handle, list;
  
      switch (method) {
-@@ -458,6 +517,13 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
++    case 0x00000104: /* NV1BA0_PIO_SYNCHRONIZE */
++        if (d->regs[NV_PAPU_FENADDR]) {
++            stb_phys(address_space_memory, d->regs[NV_PAPU_FENADDR] + 15,
++                     NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
++            stb_phys(address_space_memory, d->regs[NV_PAPU_FENADDR] + 14, 1);
++        }
++        break;
++
++    case 0x0000010C: /* NV1BA0_PIO_SET_SE2FE_PROTECTION */
++        break;
++
+     case NV1BA0_PIO_VOICE_LOCK:
+         voice_lock(d, (uint16_t)d->regs[NV_PAPU_FECV], argument & 1);
+         break;
+@@ -458,6 +532,13 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
              GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
          d->vp.ssl[current_voice].count[ssl] =
              (uint8_t)GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_COUNT);
@@ -379,7 +446,7 @@ index 128d86f..b9c5af9 100644
          break;
      }
      case NV1BA0_PIO_SET_VOICE_SSL_B: {
-@@ -468,6 +534,13 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -468,6 +549,13 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
              GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
          d->vp.ssl[current_voice].count[ssl] =
              (uint8_t)GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_COUNT);
@@ -393,7 +460,21 @@ index 128d86f..b9c5af9 100644
          break;
      }
  
-@@ -752,6 +825,9 @@ struct VpVoiceStat {
+@@ -574,8 +662,12 @@ void mcpx_apu_vp_write(void *opaque, hwaddr addr, uint64_t val,
+     MCPXAPUState *d = (MCPXAPUState *)opaque;
+     (void)size;
+ 
+-    /* Dispatch known methods through fe_method */
++    /* Dispatch known methods through fe_method under the APU lock so PIO
++     * writes do not race mcpx_apu_vp_frame on d->regs, d->vp, or RAM voice
++     * bitfields. */
++    qemu_mutex_lock(&d->lock);
+     fe_method(d, (uint32_t)addr, (uint32_t)val);
++    qemu_mutex_unlock(&d->lock);
+ }
+ 
+ /* ============================================================
+@@ -752,6 +844,9 @@ struct VpVoiceStat {
      uint32_t addr, fmt;
      uint16_t vol0, vol1;
      uint8_t  bin0, bin1;
@@ -403,7 +484,7 @@ index 128d86f..b9c5af9 100644
      const char *cls;
  };
  static struct VpVoiceStat s_vstat[MCPX_HW_MAX_VOICES];
-@@ -858,6 +934,13 @@ static void vp_stat_report(void)
+@@ -858,6 +953,13 @@ static void vp_stat_report(void)
                  s->rate, s->ea, s->vol0, s->vol1, s->bin0, s->bin1, s->addr,
                  s->cls ? s->cls : "?", s->frames,
                  sqrt(s->sq / s->frames) * 32768.0, (double)s->zc / s->frames);
@@ -417,7 +498,7 @@ index 128d86f..b9c5af9 100644
          s->frames = 0; s->zc = 0; s->sq = 0;
      }
  }
-@@ -1132,6 +1215,11 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -1132,6 +1234,11 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
          count = d->vp.ssl[v].count[ssl_index];
  
          if (count == 0) {
@@ -429,7 +510,7 @@ index 128d86f..b9c5af9 100644
              voice_set_mask(d, (uint16_t)v, NV_PAVS_VOICE_PAR_OFFSET,
                             NV_PAVS_VOICE_PAR_OFFSET_CBO, 0);
              d->vp.ssl[v].ssl_seg = 0;
-@@ -1146,6 +1234,13 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -1146,6 +1253,13 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
              return -1;
          }
  
@@ -443,7 +524,7 @@ index 128d86f..b9c5af9 100644
          hwaddr addr = d->regs[NV_PAPU_VPSSLADDR] + page * 8;
          segment_offset = ldl_le_phys(address_space_memory, addr);
          segment_length = ldl_le_phys(address_space_memory, addr + 4);
-@@ -1278,6 +1373,12 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -1278,6 +1392,12 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                  d->vp.ssl[v].ssl_seg = 0;
                  set_notify_status(d, v, MCPX_HW_NOTIFIER_SSLA_DONE + ssl_index,
                                    NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
@@ -456,7 +537,7 @@ index 128d86f..b9c5af9 100644
              }
          } else {
              if (loop) {
-@@ -1406,7 +1507,10 @@ static void voice_process(MCPXAPUState *d,
+@@ -1406,7 +1526,10 @@ static void voice_process(MCPXAPUState *d,
      dbg->stereo = stereo;
      dbg->paused = paused;
  
@@ -468,7 +549,7 @@ index 128d86f..b9c5af9 100644
  
      /* Step filter envelope */
      float ef_value = voice_step_envelope(
-@@ -1449,6 +1553,9 @@ static void voice_process(MCPXAPUState *d,
+@@ -1449,6 +1572,9 @@ static void voice_process(MCPXAPUState *d,
              samples[i][0] = mixbins[mp_bin][i];
              samples[i][1] = mixbins[mp_bin][i];
          }
@@ -478,7 +559,7 @@ index 128d86f..b9c5af9 100644
          bool clear_mix = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
                                          NV_PAVS_VOICE_CFG_FMT_CLEAR_MIX) != 0;
          if (clear_mix) {
-@@ -1517,6 +1624,11 @@ static void voice_process(MCPXAPUState *d,
+@@ -1517,6 +1643,11 @@ static void voice_process(MCPXAPUState *d,
          s_vstat[v].rate = rate;
          s_vstat[v].vol0 = vol[0]; s_vstat[v].vol1 = vol[1];
          s_vstat[v].bin0 = (uint8_t)bin[0]; s_vstat[v].bin1 = (uint8_t)bin[1];
@@ -490,7 +571,7 @@ index 128d86f..b9c5af9 100644
      }
  
      if (voice_should_mute(v)) return;
-@@ -1629,11 +1741,32 @@ static void vp_trace_positions(MCPXAPUState *d)
+@@ -1629,11 +1760,32 @@ static void vp_trace_positions(MCPXAPUState *d)
      }
  }
  
@@ -523,7 +604,7 @@ index 128d86f..b9c5af9 100644
      for (int list = 0; list < 3; list++) {
          hwaddr top, current, next;
          top = voice_list_regs[list].top;
-@@ -1654,13 +1787,13 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+@@ -1654,13 +1806,13 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
  
              if (!voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                  NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
@@ -544,7 +625,7 @@ index 128d86f..b9c5af9 100644
              } else {
                  /* Process voice directly (single-threaded) */
                  voice_process(d, mixbins, d->vp.sample_buf, v, list);
-@@ -1669,6 +1802,48 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+@@ -1669,6 +1821,48 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
          }
      }
  
@@ -715,7 +796,7 @@ index 965dd08..450fcfb 100644
          kernel_drain_dpcs();   /* deferred work, before due timers */
          now = (long long)GetTickCount64();
 diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
-index 3a09ca8..ea103db 100644
+index 3a09ca8..15ae119 100644
 --- a/src/kernel/kernel_hal.c
 +++ b/src/kernel/kernel_hal.c
 @@ -93,6 +93,92 @@ int xbox_IrqlRaisedCount(void)
@@ -776,7 +857,7 @@ index 3a09ca8..ea103db 100644
 +
 +static void dispatch_lock_take(void)
 +{
-+    if (t_in_isr || !dispatch_lock_on())
++    if (!dispatch_lock_on())
 +        return;
 +    if (t_entering_dpc) {
 +        /* A DPC waits for raised threads, but not forever. */
@@ -822,14 +903,20 @@ index 3a09ca8..ea103db 100644
      d = now ? InterlockedIncrement(&g_irql_raised_count)
              : InterlockedDecrement(&g_irql_raised_count);
      InterlockedIncrement(&s_transitions);
-@@ -213,21 +303,30 @@ static void irql_track(KIRQL old_level, KIRQL new_level, void *ra)
+@@ -213,21 +303,36 @@ static void irql_track(KIRQL old_level, KIRQL new_level, void *ra)
  int xbox_IrqlEnterInterrupt(int level)
  {
      int saved = (int)g_current_irql;
 +    if (level > DISPATCH_LEVEL)
 +        t_in_isr++;
      if (g_current_irql != (KIRQL)level) {
-+        t_entering_dpc = (level == DISPATCH_LEVEL);
++        /* Both DPCs (level 2) and device ISRs (level > 2) must take the
++         * dispatch lock: KeInsertQueueDpc runs DPCs inline inside the ISR
++         * (where g_current_irql is already 16, so irql_track(16, 2) does not
++         * cross the DISPATCH_LEVEL boundary), and DirectSound's APU ISR
++         * mutates the same voice lists and registers that DISPATCH_LEVEL
++         * code protects. */
++        t_entering_dpc = 1;
          irql_track(g_current_irql, (KIRQL)level, IRQL_CALLER());
 +        t_entering_dpc = 0;
          g_current_irql = (KIRQL)level;
