@@ -29,6 +29,10 @@
 - [x] **Music bug** (user report, 2026-10-20): music stopped, came back quiet/crackling, no next track, static, crash –
       DirectSound's stream DPC raced game threads at DISPATCH_LEVEL (runtime dispatch lock); stereo downmix of the
       speaker bins fixed the left/right imbalance and clipping (see notes 2026-10-21)
+- [x] **Loud, distorted music and a freeze at high frame rates** (user report, 2026-11-01, with the 4x performance
+      work): device ISRs ran without the dispatch lock (a DPC queued from the APU ISR skipped it), guest PIO writes
+      raced the APU frame thread and could clobber a latched idle-voice trap, PIO SYNCHRONIZE was unhandled – fixed
+      in runtime patch 0001 (see notes 2026-11-01/02); confirm over longer sessions
 - [x] **Results-screen lag** (user report, 2026-10-21): DirectSound waited 0.5 s per stopped voice – the runtime
       always reported the same idle voice (v72) and never the one DirectSound retires the buffer through (v73);
       idle-voice traps are round-robin now (see notes 2026-10-21)
@@ -80,6 +84,9 @@
       native build with MinGW / llvm-mingw; menus 60+ fps, rides ~40-110 fps (Windows 11, RTX 4070 SUPER)
 - [x] Windows: saves "Unable to load" and an empty soundtrack list – zero-length directory pattern (runtime
       patch 0002); music turning loud/distorted – dispatch-lock timeout raised to 1000 ms on Windows
+- [x] Windows: creating a boarder showed the existing profiles twice, deleting one damaged the other – a finished
+      directory listing restarted from the first entry (runtime patch 0002, 2026-10-31, user-tested); more save and
+      boarder testing (several profiles, delete first/middle/last, career over sessions) still to do
 - [x] Windows: exe started directly (defaults in WinMain, game files found next to the exe or via `game_dir`),
       window mode saved, window icon from the disc
 - [x] VS Code on Windows and Linux (2026-10-31): Visual Studio debugger with a PDB for our code and the runtime,
