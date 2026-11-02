@@ -51,19 +51,35 @@ xbe_version() {
 # Idempotent: an already applied patch is skipped. If the submodule has edits that match neither state (runtime
 # work in progress), it warns and builds what is there – export the edits with:
 #   git -C xboxrecomp diff -- . ':!tools/linux' > patches/xboxrecomp/0001-linux-x86_64-mmio-traps-casefold-mingw-oldnames.patch
+# Whether the submodule holds exactly upstream + every patch, applied in order. Checked as a series: patches that
+# change the same lines (0005 on top of 0001) cannot be reversed one by one. Builds the expected state in a temporary
+# index (the working tree is not touched) and compares the working tree with it.
+runtime_patches_applied() {
+  local idx p ok=0
+  idx="$(mktemp)"
+  GIT_INDEX_FILE="$idx" git -C "$TOOLKIT" read-tree HEAD || { rm -f "$idx"; return 1; }
+  for p in "$ROOT"/patches/xboxrecomp/*.patch; do
+    [ -f "$p" ] || continue
+    # The index holds LF; a Windows checkout (core.autocrlf) has the patch files as CRLF.
+    tr -d '\r' < "$p" | GIT_INDEX_FILE="$idx" git -C "$TOOLKIT" apply --cached - 2>/dev/null || { ok=1; break; }
+  done
+  [ $ok = 0 ] && GIT_INDEX_FILE="$idx" git -C "$TOOLKIT" diff --quiet || ok=1
+  rm -f "$idx"
+  return $ok
+}
+
 apply_runtime_patches() {
   local p
   [ -f "$TOOLKIT/CMakeLists.txt" ] || git -C "$ROOT" submodule update --init xboxrecomp
-  for p in "$ROOT"/patches/xboxrecomp/*.patch; do
-    [ -f "$p" ] || continue
-    if git -C "$TOOLKIT" apply --reverse --check "$p" 2>/dev/null; then
-      continue                                   # already applied
-    elif git -C "$TOOLKIT" apply --check "$p" 2>/dev/null; then
-      git -C "$TOOLKIT" apply "$p"
-      echo "Applied runtime patch: $(basename "$p")"
-    else
-      echo "WARNING: $(basename "$p") is neither applied nor applicable – xboxrecomp has other local edits." >&2
-      echo "         Building the submodule as it is. If those edits are intended, re-export the patch (see _common.sh)." >&2
-    fi
-  done
+  runtime_patches_applied && return 0            # all applied
+  if git -C "$TOOLKIT" diff --quiet HEAD && [ -z "$(git -C "$TOOLKIT" status --porcelain --untracked-files=normal)" ]; then
+    for p in "$ROOT"/patches/xboxrecomp/*.patch; do   # an untouched submodule: the series, in order
+      [ -f "$p" ] || continue
+      git -C "$TOOLKIT" apply "$p" && echo "Applied runtime patch: $(basename "$p")" \
+        || echo "WARNING: $(basename "$p") does not apply to the submodule's commit." >&2
+    done
+    return 0
+  fi
+  echo "WARNING: xboxrecomp has local edits that are not exactly the patch series in patches/xboxrecomp/." >&2
+  echo "         Building the submodule as it is. If those edits are intended, re-export the patches (see _common.sh)." >&2
 }

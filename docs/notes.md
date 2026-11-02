@@ -757,3 +757,9 @@ _(date – what was done, what was found, next step)_
     `0xFE801300`; `apu_deliver_irq` forced ISR delivery after 50 frames even when `xbox_IrqlBlocksInterrupts()` was true;
     `0xFE820104` (`NV1BA0_PIO_SYNCHRONIZE`) was unhandled so `sub_0029941A` spun for 667 iterations on voice teardown.
   - Fixed in `patches/xboxrecomp/0005-apu-isr-dispatch-lock-and-fe-trap.patch` (branch `fix/apu-isr-race`).
+- 2026-11-02 – **Runtime patches checked as a series.** Patch 0005 changes lines of 0001, so 0001 can no longer be
+  reversed on its own: `apply_runtime_patches` warned on every build and `scripts/ci.sh` would fail. New
+  `runtime_patches_applied` (scripts/_common.sh) builds upstream + all patches in order in a temporary index (patch
+  files read as LF – a Windows checkout has them as CRLF) and compares the working tree with it; an untouched
+  submodule gets the series in order. Tested: the patched submodule (no warning), a fresh one (applied, then
+  recognised, second run quiet).
