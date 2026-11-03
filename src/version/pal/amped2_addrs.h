@@ -11,5 +11,7 @@
 #define AMPED2_D3D_DEVICE_PTR   0x0032CEF8u  /* D3D global device pointer (put/limit at +0x00/+0x04) */
 #define AMPED2_PB_RECORDS       0x0032ACC0u  /* RunPushBuffer patch records, 20 bytes each */
 #define AMPED2_PB_PENDING       0x0032AAACu  /* count of pending RunPushBuffer patches */
+#define AMPED2_GAME_CLOCK30     0x003AD0C4u  /* int: accumulated frame time x 30 (per-frame update 0x001BF290) */
+#define AMPED2_GAME_FRAME_MS    0u           /* the frame's time step x 1000: not located for PAL */
 
 #endif

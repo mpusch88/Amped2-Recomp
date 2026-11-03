@@ -20,6 +20,8 @@
  *   AMPED2_VK_TEXLOG=1        log the first 60 re-decodes of cached textures
  *   AMPED2_VK_NO_RC=1         ignore the combiner extension (milestone-2 look)
  *   AMPED2_TIME_TRACE=1       log the game's clock next to wall time and flips (every 5 s)
+ *   AMPED2_VK_FRAMETIMES=<f>  write every flip's timings as CSV (ft_record)
+ *   AMPED2_VK_PRESENT_WAIT=0  do not pace FIFO flips with VK_KHR_present_wait
  *
  * Graphics settings (src/settings/settings.h):
  *   resolution scale  every render target is allocated at its guest size times
@@ -72,6 +74,7 @@ static const uint32_t k_vsh_spv[] =
 #include "vk_backend.h"
 #include "settings/settings.h"
 #include "title_image.h"
+#include "amped2_addrs.h"      /* src/version/<build>/: the game clock */
 
 #define VKB_MAX_SURFACES    16
 #define VKB_MAX_SWAP_IMAGES 8
@@ -249,6 +252,8 @@ static struct {
     uint32_t          shown_va[4];         /* surfaces the title has flipped */
     uint32_t          rt_flip;             /* last flip with draws off screen, +1 */
     VkPresentModeKHR  present_mode;
+    int               present_wait;        /* VK_KHR_present_wait: FIFO flips paced on the display */
+    uint64_t          present_id;          /* last present id on this swapchain */
 
     VkFormat          depth_format;
     VkDescriptorSetLayout set_layout;
@@ -520,7 +525,10 @@ static int create_device(void)
         VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
         VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
     };
-    uint32_t i;
+    const char *all[5];
+    uint32_t i, nx;
+    VkPhysicalDevicePresentIdFeaturesKHR pid, have_pid;
+    VkPhysicalDevicePresentWaitFeaturesKHR pwait, have_pwait;
 
     for (i = 0; i < sizeof exts / sizeof exts[0]; i++)
         if (!device_has_extension(exts[i])) {
@@ -529,6 +537,12 @@ static int create_device(void)
         }
     memset(&have3, 0, sizeof have3);
     have3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT;
+    memset(&have_pid, 0, sizeof have_pid);
+    have_pid.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
+    memset(&have_pwait, 0, sizeof have_pwait);
+    have_pwait.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
+    have3.pNext = &have_pid;
+    have_pid.pNext = &have_pwait;
     memset(&query, 0, sizeof query);
     query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     query.pNext = &have3;
@@ -557,13 +571,39 @@ static int create_device(void)
     f13.dynamicRendering = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
 
+    /* Optional: present_id + present_wait pace FIFO on the display itself
+     * (present_frame). AMPED2_VK_PRESENT_WAIT=0 turns it off for A/B tests. */
+    nx = 0;
+    for (i = 0; i < sizeof exts / sizeof exts[0]; i++)
+        all[nx++] = exts[i];
+    {
+        const char *e = getenv("AMPED2_VK_PRESENT_WAIT");
+        V.present_wait = !(e && *e == '0')
+            && device_has_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME)
+            && device_has_extension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME)
+            && have_pid.presentId && have_pwait.presentWait;
+    }
+    if (V.present_wait) {
+        all[nx++] = VK_KHR_PRESENT_ID_EXTENSION_NAME;
+        all[nx++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
+        memset(&pid, 0, sizeof pid);
+        pid.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
+        pid.presentId = VK_TRUE;
+        memset(&pwait, 0, sizeof pwait);
+        pwait.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
+        pwait.presentWait = VK_TRUE;
+        pwait.pNext = &pid;
+        eds3.pNext = &pwait;
+    }
+    fprintf(stderr, "  [VK] present wait: %s\n", V.present_wait ? "yes" : "no");
+
     memset(&ci, 0, sizeof ci);
     ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     ci.pNext = &f13;
     ci.queueCreateInfoCount = 1;
     ci.pQueueCreateInfos = &qci;
-    ci.enabledExtensionCount = sizeof exts / sizeof exts[0];
-    ci.ppEnabledExtensionNames = exts;
+    ci.enabledExtensionCount = nx;
+    ci.ppEnabledExtensionNames = all;
     VK_CHECK(vkCreateDevice(V.gpu, &ci, NULL, &V.device));
     volkLoadDevice(V.device);
     vkGetDeviceQueue(V.device, V.queue_family, 0, &V.queue);
@@ -669,6 +709,7 @@ static int create_swapchain(void)
         VK_CHECK(vkCreateSemaphore(V.device, &sci, NULL, &V.sem_render_done[i]));
     }
     V.swap_dirty = 0;
+    V.present_id = 0;                      /* ids count per swapchain */
     fprintf(stderr, "  [VK] swapchain %ux%u, %u images, %s\n",
             V.swap_extent.width, V.swap_extent.height, V.swap_count,
             mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox"
@@ -1247,6 +1288,8 @@ static int ensure_ready(void)
     return 1;
 }
 
+static uint64_t ft_fence_ticks;            /* frame-slot fence waits since the last flip (ft_record) */
+
 static int ensure_recording(void)
 {
     VkCommandBufferBeginInfo bi;
@@ -1284,7 +1327,11 @@ static int ensure_recording(void)
         }
         V.perf_pending = 0;
     }
-    vkWaitForFences(V.device, 1, &V.frame_fence, VK_TRUE, UINT64_MAX);
+    {
+        uint64_t t0 = SDL_GetPerformanceCounter();
+        vkWaitForFences(V.device, 1, &V.frame_fence, VK_TRUE, UINT64_MAX);
+        ft_fence_ticks += SDL_GetPerformanceCounter() - t0;
+    }
     vkResetFences(V.device, 1, &V.frame_fence);
     vkResetCommandBuffer(V.cmd, 0);
     memset(&bi, 0, sizeof bi);
@@ -2964,11 +3011,12 @@ static void update_title(void)
         static uint32_t logged;
         if (now - logged >= 5000) {
             if (getenv("AMPED2_TIME_TRACE")) {
-                /* The game's clock (accumulated frame time x 30, at 0x3AD0C4,
-                 * see docs/notes.md): ~30 ticks per second at any frame rate. */
+                /* The game's clock (accumulated frame time x 30, per build at
+                 * AMPED2_GAME_CLOCK30, see docs/notes.md): ~30 ticks per second
+                 * at any frame rate. */
                 const uint8_t *m = (const uint8_t *)xbox_GetMemoryOffset();
                 fprintf(stderr, "  [TT] wall %u ms flips %u ticks30 %d\n", now, V.flips,
-                        *(const int32_t *)(m + 0x3AD0C4));
+                        *(const int32_t *)(m + AMPED2_GAME_CLOCK30));
             }
             fprintf(stderr, "  [VK] %s | decodes/5s: %u (%u new, %.1f Mtexels) | hashed: %u, %.1f MB\n",
                     tb + sizeof "Amped 2 (Recomp, Vulkan) | " - 1, V.stat_decodes,
@@ -3132,6 +3180,118 @@ static void frame_pace(void)
     }
 }
 
+/* Frame times. A 5 s average hides what a player feels as judder: rides
+ * averaging 110-145 fps looked "quantized" (user test 2026-11-02). Per real
+ * flip: the interval between presents, the wait for a swapchain image (FIFO's
+ * back pressure), frame_pace's sleep, the present call, and the game's own
+ * time step for that frame (AMPED2_GAME_FRAME_MS, ms; -1 where the build does
+ * not know it). Every 5 s the log gets percentiles of the interval and of the
+ * game's step; AMPED2_VK_FRAMETIMES=<file> also writes every flip as CSV. */
+#define FT_MAX 8192
+
+static struct {
+    float iv[FT_MAX], dt[FT_MAX];
+    unsigned n;
+    uint64_t t0, last, next_report;
+    FILE *csv;
+    int csv_init;
+} FT;
+
+static double ft_ms(uint64_t a, uint64_t b)
+{
+    return (double)(int64_t)(b - a) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+}
+
+static float ft_game_dt(void)
+{
+#if AMPED2_GAME_FRAME_MS
+    float v;
+    memcpy(&v, (const uint8_t *)xbox_GetMemoryOffset() + AMPED2_GAME_FRAME_MS, sizeof v);
+    return v;
+#else
+    return -1.0f;
+#endif
+}
+
+static int ft_cmp(const void *a, const void *b)
+{
+    float x = *(const float *)a, y = *(const float *)b;
+    return (x > y) - (x < y);
+}
+
+static float ft_pct(const float *sorted, unsigned n, double p)
+{
+    unsigned i = (unsigned)(p * (double)(n - 1) + 0.5);
+    return sorted[i < n ? i : n - 1];
+}
+
+static void ft_report(void)
+{
+    static float s[FT_MAX];
+    unsigned i, spikes = 0;
+    float p50;
+
+    if (FT.n < 2)
+        return;
+    memcpy(s, FT.iv, FT.n * sizeof s[0]);
+    qsort(s, FT.n, sizeof s[0], ft_cmp);
+    p50 = ft_pct(s, FT.n, 0.50);
+    for (i = 0; i < FT.n; i++)
+        if (FT.iv[i] > 1.5f * p50)
+            spikes++;
+    fprintf(stderr, "  [VK] frame ms/5s: p50 %.2f p95 %.2f p99 %.2f max %.2f | >1.5x p50: %u of %u",
+            (double)p50, (double)ft_pct(s, FT.n, 0.95), (double)ft_pct(s, FT.n, 0.99),
+            (double)s[FT.n - 1], spikes, FT.n);
+    memcpy(s, FT.dt, FT.n * sizeof s[0]);
+    qsort(s, FT.n, sizeof s[0], ft_cmp);
+    if (s[0] >= 0.0f)
+        fprintf(stderr, " | game step p5 %.2f p50 %.2f p95 %.2f max %.2f",
+                (double)ft_pct(s, FT.n, 0.05), (double)ft_pct(s, FT.n, 0.50),
+                (double)ft_pct(s, FT.n, 0.95), (double)s[FT.n - 1]);
+    fputc('\n', stderr);
+    if (FT.csv)
+        fflush(FT.csv);
+    FT.n = 0;
+}
+
+/* One real flip, after its present: acq0/acq1 around the image acquire,
+ * pace0/pace1 around frame_pace, wait0 after vkQueuePresentKHR returned, end
+ * after the present wait. */
+static void ft_record(uint64_t acq0, uint64_t acq1, uint64_t pace0, uint64_t pace1, uint64_t wait0,
+                      uint64_t end)
+{
+    double iv = FT.last ? ft_ms(FT.last, end) : 0.0;
+    float dt = ft_game_dt();
+
+    if (!FT.csv_init) {
+        const char *p = getenv("AMPED2_VK_FRAMETIMES");
+        FT.csv_init = 1;
+        FT.t0 = end;
+        FT.next_report = end + 5 * SDL_GetPerformanceFrequency();
+        if (p && *p && (FT.csv = fopen(p, "w")) != NULL) {
+            setvbuf(FT.csv, NULL, _IOFBF, 1 << 16);
+            fprintf(FT.csv, "flip,t_ms,interval_ms,acquire_ms,pace_ms,present_ms,present_wait_ms,fence_ms,"
+                    "game_step_ms,draws\n");
+            fprintf(stderr, "  [VK] frame times to %s\n", p);
+        }
+    }
+    FT.last = end;
+    if (iv > 0.0 && FT.n < FT_MAX) {
+        FT.iv[FT.n] = (float)iv;
+        FT.dt[FT.n] = dt;
+        FT.n++;
+    }
+    if (FT.csv)
+        fprintf(FT.csv, "%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.4f,%u\n", V.flips,
+                ft_ms(FT.t0, end), iv, ft_ms(acq0, acq1), ft_ms(pace0, pace1), ft_ms(pace1, wait0),
+                ft_ms(wait0, end), ft_ms(0, ft_fence_ticks), (double)dt, V.last_frame_draws);
+    ft_fence_ticks = 0;
+    if (end >= FT.next_report) {
+        ft_report();
+        FT.next_report = end + 5 * SDL_GetPerformanceFrequency();
+    }
+}
+
 /* Present the current picture. real_flip: the title flipped (count it, log
  * it, dump it); otherwise a present for a new overlay frame between flips. */
 static void present_frame(int real_flip)
@@ -3146,6 +3306,8 @@ static void present_frame(int real_flip)
     VkPresentInfoKHR pi;
     VkbSurface *s;
     int capture_dump = 0;
+    uint64_t ft_acq0, ft_acq1, ft_pace0, ft_pace1, ft_wait0;
+    VkPresentIdKHR pid;
 
     if (!ensure_ready())
         return;
@@ -3197,8 +3359,10 @@ static void present_frame(int real_flip)
     /* Bounded: the NV2A thread must never block on the window (a hidden or
      * unresponsive window can withhold images indefinitely). Without an image
      * the frame's work is still submitted, just not shown. */
+    ft_acq0 = SDL_GetPerformanceCounter();
     r = vkAcquireNextImageKHR(V.device, V.swapchain, 100000000ull /* 100 ms */,
                               V.sem_acquire, VK_NULL_HANDLE, &idx);
+    ft_acq1 = SDL_GetPerformanceCounter();
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         VkSubmitInfo none;
         if (r == VK_ERROR_OUT_OF_DATE_KHR)
@@ -3281,8 +3445,10 @@ static void present_frame(int real_flip)
         fprintf(stderr, "  [VK] submit failed\n");
         return;
     }
+    ft_pace0 = SDL_GetPerformanceCounter();
     if (real_flip)
         frame_pace();
+    ft_pace1 = SDL_GetPerformanceCounter();
     memset(&pi, 0, sizeof pi);
     pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.waitSemaphoreCount = 1;
@@ -3290,9 +3456,28 @@ static void present_frame(int real_flip)
     pi.swapchainCount = 1;
     pi.pSwapchains = &V.swapchain;
     pi.pImageIndices = &idx;
+    if (V.present_wait) {
+        memset(&pid, 0, sizeof pid);
+        pid.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
+        pid.swapchainCount = 1;
+        V.present_id++;
+        pid.pPresentIds = &V.present_id;
+        pi.pNext = &pid;
+    }
     r = vkQueuePresentKHR(V.queue, &pi);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR)
         V.swap_dirty = 1;
+    ft_wait0 = SDL_GetPerformanceCounter();
+    /* FIFO at the display's rate: without this the title renders ahead until
+     * the swapchain is full and then blocks for a whole refresh, so rides came
+     * out as bursts (7 flips ~5 ms apart, then ~20 ms; 2026-11-03). Waiting
+     * until the previous flip is on screen spaces the flips one refresh apart
+     * with one frame queued. Bounded: a hidden window never shows it. */
+    if (V.present_wait && real_flip && V.present_mode == VK_PRESENT_MODE_FIFO_KHR
+            && V.present_id > 1 && r >= 0)
+        vkWaitForPresentKHR(V.device, V.swapchain, V.present_id - 1, 40000000ull /* 40 ms */);
+    if (real_flip)
+        ft_record(ft_acq0, ft_acq1, ft_pace0, ft_pace1, ft_wait0, SDL_GetPerformanceCounter());
 
     if (real_flip && V.dump_prefix && s && V.flips % V.dump_every == 0)
         dump_surface(s);

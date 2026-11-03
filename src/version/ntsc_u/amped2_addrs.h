@@ -16,5 +16,8 @@
 #define AMPED2_D3D_DEVICE_PTR   0x0032CBF8u  /* D3D global device pointer: `mov esi, [0x32CBF8]` in 0x0031E4E0 */
 #define AMPED2_PB_RECORDS       0x0032A9C0u  /* `lea eax, [eax*4 + 0x32A9C0]` (20-byte records) at 0x00322666 */
 #define AMPED2_PB_PENDING       0x0032A7ACu  /* `dec dword ptr [0x32A7AC]` at 0x00322683 */
+#define AMPED2_GAME_CLOCK30     0x003ACDC4u  /* int: accumulated frame time x 30 (`mov [0x3ACDC4], eax` at 0x001BF40A,
+                                              * in the per-frame update 0x001BF280) */
+#define AMPED2_GAME_FRAME_MS    0x003ACDC8u  /* float: the frame's time step x 1000.0 (`fst [0x3ACDC8]` at 0x001BF367) */
 
 #endif

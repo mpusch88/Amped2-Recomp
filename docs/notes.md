@@ -834,3 +834,32 @@ _(date â€“ what was done, what was found, next step)_
   58-68 ms, all one thread in XPP/D3D code (0x0032F89C, 0x00332C69, 0x003220D6 â€¦, the same as the 58 ms one before),
   no starve. New: 66 seconds with clamped samples between 33 s and 411 s (~70 of 48000 per second, light clipping;
   the earlier runs had 3) â€“ not reported by ear; watch whether it is the music track or the fix.
+- 2026-11-02 â€“ **Frame-time logging for the ride judder (Vulkan back end).** The existing logs only have 5 s
+  averages (`[VK] FPS`, `[PERF]`), which hide uneven frames. Now per real flip: interval between presents, swapchain
+  image wait (FIFO back pressure), `frame_pace` sleep, present call, and the game's own step for the frame. Log line
+  every 5 s: `[VK] frame ms/5s: p50 p95 p99 max | >1.5x p50: n of N | game step p5 p50 p95 max`;
+  `AMPED2_VK_FRAMETIMES=<file>` writes every flip as CSV.
+  - Game clock, NTSC-U (disassembly): the per-frame update `sub_001BF280` (PAL `sub_001BF290`) stores the frame's
+    time x 1000.0 at `0x3ACDC8` (`fst` at 0x001BF367) and accumulated time x 30.0 as an int at `0x3ACDC4` (`mov` at
+    0x001BF40A). New per-build `AMPED2_GAME_FRAME_MS` / `AMPED2_GAME_CLOCK30` (PAL: clock 0x3AD0C4 from 2026-10-20,
+    frame time not located â†’ 0). `AMPED2_TIME_TRACE` read the PAL address 0x3AD0C4 on every build; it uses
+    `AMPED2_GAME_CLOCK30` now.
+  - User run 2026-11-03 (unlocked, frame limit = display, 144 Hz FIFO, 3440x1440, `logs/ft-display.*`): menus
+    and rides presented 720 flips per 5 s, but in bursts – 7 flips ~5 ms apart, then one ~20 ms (p50 4-6 ms,
+    p95 14-20 ms, 100-240 flips per 5 s over 1.5x p50). Acquire, `frame_pace` and present took ~0 ms: the title
+    rendered ahead until the swapchain/frame slots were full and then blocked for a whole refresh elsewhere. That is
+    the "jerky at 110-145 fps" judder.
+  - The `0x3ACDC8` value is not the per-frame step at flip time (mostly 0, never near the interval); the CSV column
+    stays but is not to be trusted. `AMPED2_GAME_CLOCK30` is: 29.98 ticks/s over 779 s.
+- 2026-11-03 – **Present wait: FIFO flips paced on the display.** With `VK_KHR_present_id` + `VK_KHR_present_wait`
+  (optional, logged as `[VK] present wait: yes`), each real flip in FIFO mode waits until the previous flip is on
+  screen (40 ms bound), so flips come one refresh apart with one frame queued. `AMPED2_VK_PRESENT_WAIT=0` turns it
+  off. CSV gains `present_wait_ms` and `fence_ms` (frame-slot fence waits since the last flip).
+  - User runs (`logs/ft-display-pw.*`, `logs/ft-pw2.*` 13 min with `RECOMP_AUDIO_WAV`): menus and light stretches a
+    steady 7.0 ms (0-5 flips per 5 s over 1.5x p50); heavy ride stretches 115-130 fps (p50 7.5-8.5, p95 ~11 ms) –
+    the title not finishing within a 144 Hz refresh, CPU time (texture hashing etc.), not pacing. Game clock 29.98
+    ticks/s, i.e. real time ("felt fast" by the user in one run: not the clock).
+  - Audio in the same runs: 0 starves, 0 underruns, gap_max <= 18.5 ms; the WAV has no silent gaps in the music
+    (one 3 ms), clipping in 5 s of 789 (<= 68 samples), three click-like jumps (250 s, 341 s, 602 s). The user heard
+    "some dropouts" / glitches: not visible as silence in the mix – suspect the music stream (a voice skipping), next
+    time with the time of the glitch.
