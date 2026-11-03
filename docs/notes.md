@@ -768,3 +768,24 @@ _(date – what was done, what was found, next step)_
   upstreamed on its own. 0001 now carries the corrected code; 0002-0004 each apply to upstream + 0001 on their own
   again. The resulting runtime sources are byte-identical to 0001+0005 (checked). SSX3-Recomp shares 0001 and gets
   the fixes with it.
+- 2026-11-02 – **User play test of `fix/apu-isr-race` (6fb1e26), Windows, ~85 min.** Settings: 2x, 21:9 native HD,
+  unlocked frame rate with no limit (`frame_limit 0`, so FIFO vsync at 144 Hz paces), borderless. Log
+  `logs/user-test3.log`, F10 captures `logs/capture/test_658863/706752/708716` (end of a ride, results screen with
+  the coin, end-of-run menu – all three pictures correct, full width).
+  - Works: boarder create/load/delete (no duplicates), menus with bars, challenge cards and rides full width,
+    coins. Audio "mostly OK" for most of the session (one short skip, see below), but **it broke again quickly
+    near the end, also without F10** – the audio problem is not fixed. No `[APU]`/IRQL
+    warnings, no crash.
+  - Problem: **general lag/jerkiness while playing**, "the background moving forward one tick at a time, almost
+    quantized"; once a strong slowdown at the end of a run; once the audio skipped. The 5 s averages do not show it:
+    rides 110–135 fps (draws ~900–1050), menus 143–145 (vsync cap), two dips (61.8 at a ride's start, 67–72 at
+    loads). So it is frame pacing, not throughput.
+  - Leads, in order: (1) rides render at 110–135 fps under a 144 Hz FIFO vsync, so frames alternate between one
+    and two refreshes (6.9 / 13.9 ms) – classic judder; check with `frame_limit` 72/60 or `framerate original`.
+    (2) How the game advances time per flip (fixed step per flip/vblank vs. measured time): with a fixed step,
+    uneven flip intervals become uneven motion, and steps that the game derives from the vblank count could be
+    "quantized". (3) CPU spikes on the NV2A thread: texture hashing reads ~5 GB per 5 s in rides (~70–100k
+    textures hashed), and ~330 log lines/s (`[GPU] draw #` every 200 draws, `[NV2A] DMA_PUT`) go to unbuffered
+    stderr – the log grew to 70 MB / 1.7 M lines. (4) The audio skip is likely a host stall (CPU starvation of the
+    APU frame thread), not the fixed race. F10 itself stalls for one frame (`dump_surface` reads back and writes a
+    14.5 MB BMP synchronously) and leaves nothing switched on.
