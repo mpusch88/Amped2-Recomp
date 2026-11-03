@@ -16,7 +16,7 @@ code replace the Xbox kernel, GPU, audio and input. No emulator.
 > This repo contains **no game code and no game data**. You need your own, legally obtained
 > Amped 2 Xbox disc. The C code is generated locally from your `default.xbe` and never committed.
 
-It follows the same route as SSX3-Recomp (our SSX 3 port with the same toolkit): Linux (Steam Deck) and
+It follows the same route as SSX3-Recomp (bertibertig's SSX 3 port with the same toolkit): Linux (Steam Deck) and
 Windows, both with the Vulkan renderer; macOS later.
 
 ## Status
