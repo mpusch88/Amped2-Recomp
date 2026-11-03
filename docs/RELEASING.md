@@ -103,7 +103,8 @@ The fork (mpusch88/Amped2-Recomp) publishes the combined work branch `dev/all` t
 `dev/all` gets a regular release marked **Latest** (the owner's choice, 2026-11-03; the fork has no other
 releases), tagged `dev-<yyyymmdd>` (a second one on the same day: `dev-<yyyymmdd>.2`): same hard rules, notes in
 `docs/release-notes/dev-<yyyymmdd>.md`
-(what is new against upstream's last release, the disc of the package, what was tested), a work-log entry.
+(up front: the fork is Windows-focused, Windows package only; what is new against upstream's last release, the
+disc of the package, what was tested), a work-log entry.
 On Windows (Git Bash), without docker or MinGW cross tools, package only Windows from the native `build-win/`:
 
 ```bash
