@@ -96,3 +96,24 @@ gh release create <version> --verify-tag --title "Amped2-Recomp <version>" \
   dist/Amped2-Recomp-<version>-<disc>-linux-x86_64.tar.gz dist/Amped2-Recomp-<version>-<disc>-windows-x86_64.zip \
   dist/SHA256SUMS-<version>.txt
 ```
+
+## Dev pre-releases (fork, `dev/all`)
+
+The fork (mpusch88/Amped2-Recomp) publishes the combined work branch `dev/all` the same way, as a **pre-release**
+tagged `dev-<yyyymmdd>` (never `--latest`): same hard rules, notes in `docs/release-notes/dev-<yyyymmdd>.md`
+(what is new against upstream's last release, the disc of the package, what was tested), a work-log entry.
+On Windows (Git Bash), without docker or MinGW cross tools, package only Windows from the native `build-win/`:
+
+```bash
+SKIP_LINUX=1 scripts/package_release.sh dev-<yyyymmdd>     # needs the toolchain on PATH, see build-win
+```
+
+Test the unpacked zip with `run.bat` (Test (Windows)), then:
+
+```bash
+git push origin dev/all
+git tag -a dev-<yyyymmdd> dev/all -m "Amped2-Recomp dev-<yyyymmdd>" && git push origin refs/tags/dev-<yyyymmdd>
+gh release create dev-<yyyymmdd> -R mpusch88/Amped2-Recomp --verify-tag --prerelease \
+  --title "Amped2-Recomp dev-<yyyymmdd> (pre-release)" --notes-file docs/release-notes/dev-<yyyymmdd>.md \
+  dist/Amped2-Recomp-dev-<yyyymmdd>-<disc>-windows-x86_64.zip dist/SHA256SUMS-dev-<yyyymmdd>.txt
+```

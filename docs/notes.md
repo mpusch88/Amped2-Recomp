@@ -863,3 +863,9 @@ _(date â€“ what was done, what was found, next step)_
     (one 3 ms), clipping in 5 s of 789 (<= 68 samples), three click-like jumps (250 s, 341 s, 602 s). The user heard
     "some dropouts" / glitches: not visible as silence in the mix – suspect the music stream (a voice skipping), next
     time with the time of the glitch.
+- 2026-11-03 – **Dev pre-releases of `dev/all` on the fork.** Upstream releases by hand (`package_release.sh`,
+  `docs/release-notes/<version>.md`, `gh release create`, tag on `main`); the fork does the same for `dev/all` as a
+  pre-release `dev-<yyyymmdd>` (docs/RELEASING.md, "Dev pre-releases"). `package_release.sh` now packages Windows
+  from the native `build-win/` when there is no MinGW cross compiler (Git Bash), and zips with Python when `zip` is
+  missing. First one: `dev-20261103`, NTSC-U, Windows only (docker not running here, so no Linux package); the exe
+  imports only system DLLs (UCRT, XINPUT1_4, XAudio2_8, d3d11, MF, D3DCompiler_47).

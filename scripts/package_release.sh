@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the release packages into dist/ (no game files in them):
 #   dist/Amped2-Recomp-<version>-<disc>-linux-x86_64.tar.gz   built in an Ubuntu 24.04 container -> glibc 2.39+
-#   dist/Amped2-Recomp-<version>-<disc>-windows-x86_64.zip    MinGW cross build (scripts/build_win.sh)
+#   dist/Amped2-Recomp-<version>-<disc>-windows-x86_64.zip    MinGW cross build (scripts/build_win.sh), or on
+#                                                              Windows (Git Bash) the native build in build-win/
 # <disc> is the disc version the generated code belongs to (pal or ntsc-u): a package runs only with that disc.
 #   scripts/package_release.sh v0.1.0
 # Needs: docker (or podman) for the Linux build, mingw-w64-gcc and zip on the host for the Windows build, and the
@@ -43,14 +44,26 @@ if [ "${SKIP_LINUX:-0}" != 1 ]; then
 fi
 
 if [ "${SKIP_WINDOWS:-0}" != 1 ]; then
-  JOBS="$JOBS" "$ROOT/scripts/build_win.sh"
+  if command -v x86_64-w64-mingw32-gcc >/dev/null; then
+    JOBS="$JOBS" "$ROOT/scripts/build_win.sh"
+  elif [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]] && [ -f "$ROOT/build-win/CMakeCache.txt" ]; then
+    # Native Windows (Git Bash): the configured build-win/ (llvm-mingw / MinGW toolchain on PATH)
+    cmake --build "$ROOT/build-win" -j "$JOBS"
+  else
+    echo "No Windows toolchain: x86_64-w64-mingw32-gcc, or on Windows a configured build-win/" >&2; exit 1
+  fi
   PKG="$DIST/Amped2-Recomp-$VERSION-$DISC-windows-x86_64"
   rm -rf "$PKG"; mkdir -p "$PKG"
   cp "$ROOT/build-win/amped2_recomp.exe" "$ROOT/scripts/release/run.bat" "$ROOT/scripts/release/run.ps1" "$PKG/"
   common_files "$PKG"
   # Windows line endings for the text files people open in Notepad
   for f in "$PKG"/*.txt "$PKG"/licenses/*.txt "$PKG"/game_files/*.txt "$PKG"/run.bat "$PKG"/run.ps1; do sed -i 's/\r*$/\r/' "$f"; done
-  (cd "$DIST" && rm -f "$(basename "$PKG").zip" && zip -qr "$(basename "$PKG").zip" "$(basename "$PKG")")
+  if command -v zip >/dev/null; then
+    (cd "$DIST" && rm -f "$(basename "$PKG").zip" && zip -qr "$(basename "$PKG").zip" "$(basename "$PKG")")
+  else                                              # Git Bash has no zip
+    (cd "$DIST" && rm -f "$(basename "$PKG").zip" &&
+     python -I -c 'import shutil, sys; shutil.make_archive(sys.argv[1], "zip", ".", sys.argv[1])' "$(basename "$PKG")")
+  fi
   echo "Windows package: $PKG.zip"
 fi
 
