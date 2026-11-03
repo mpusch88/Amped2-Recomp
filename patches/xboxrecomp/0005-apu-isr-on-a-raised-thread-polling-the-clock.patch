@@ -1,0 +1,216 @@
+diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
+index fdb8774..f9ca749 100644
+--- a/src/apu/apu_core.c
++++ b/src/apu/apu_core.c
+@@ -178,6 +178,10 @@ static int apu_mmio_trace(void)
+  * routine never ran and no voice completion ever reached it. */
+ static volatile LONG s_irq_line;
+ 
++/* Set while the service routine runs, on the frame thread or on a raised
++ * guest thread (apu_isr_on_raised_thread): never both at once. */
++static volatile LONG s_isr_busy;
++
+ /* FETINTSTS is not derived from FECTL here. It is latched once, where the
+  * front end traps (fe_method), and an ISTS write clears it like any other
+  * status bit.
+@@ -222,6 +226,7 @@ extern uint32_t xbox_AllocThreadTib(void);
+ extern int xbox_IrqlBlocksInterrupts(void);
+ extern int xbox_IrqlEnterInterrupt(int level);
+ extern void xbox_IrqlLeaveInterrupt(int saved);
++extern void (*volatile xbox_irql_poll_hook)(void);
+ #if defined(_MSC_VER)
+ #  define APU_TLS __declspec(thread)
+ #else
+@@ -304,9 +309,22 @@ static void apu_deliver_irq(MCPXAPUState *d)
+         g_fs_base = tib;
+         tib_ready = 1;
+     }
++    /* One routine at a time: a raised thread polling the clock may take the
++     * interrupt itself (apu_isr_on_raised_thread). Checked again once the
++     * flag is ours -- a thread that raised in between would hold the
++     * dispatch lock the routine waits for, and if it is the one spinning for
++     * this very interrupt it skips its own call while the flag is taken. */
++    if (InterlockedCompareExchange(&s_isr_busy, 1, 0) != 0)
++        return;
++    if (xbox_IrqlBlocksInterrupts()) {
++        InterlockedExchange(&s_isr_busy, 0);
++        return;
++    }
+     slot = xbox_worker_stack_alloc();
+-    if (slot < 0)
++    if (slot < 0) {
++        InterlockedExchange(&s_isr_busy, 0);
+         return;
++    }
+ 
+     qemu_mutex_unlock(&d->lock);
+     g_esp = XBOX_WORKER_STACK_TOP(slot);
+@@ -316,6 +334,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
+     g_esp -= 4; *(uint32_t *)(g_apu_ram_ptr + g_esp) = 0xDEADBEEFu;
+     { int _irql = xbox_IrqlEnterInterrupt(16); fn(); xbox_IrqlLeaveInterrupt(_irql); }
+     xbox_worker_stack_free(slot);
++    InterlockedExchange(&s_isr_busy, 0);
+     qemu_mutex_lock(&d->lock);
+ 
+     {
+@@ -328,6 +347,65 @@ static void apu_deliver_irq(MCPXAPUState *d)
+     }
+ }
+ 
++/* The interrupt taken by a guest thread that busy-waits at raised IRQL
++ * (registered as xbox_irql_poll_hook; called from the clock bridges through
++ * xbox_IrqlPollPoint, see kernel_hal.c). On the console the APU's ISR
++ * preempts DISPATCH_LEVEL code; DirectSound, called by XACT inside XACT's own
++ * raise, spins there until the ISR has cleared a voice's stop-pending flag.
++ * The frame thread holds the interrupt off for as long as any thread is
++ * raised, so that wait always ran into DirectSound's 0.5 s timeout.
++ *
++ * The routine runs as a CPU would run it: on this thread, its guest stack
++ * (below the caller's esp, where an interrupt frame goes) and its TIB, at
++ * device IRQL. The thread already holds the dispatch lock, so entering IRQL
++ * 16 from its level takes nothing, and the DPC the routine queues waits for
++ * the thread to lower. The caller's guest registers are put back afterwards:
++ * the bridge is in the middle of a kernel call. d->lock is not held here; the
++ * routine's register accesses take it as any guest access does. */
++extern APU_TLS uint32_t g_ebp, g_seh_ebp;
++
++static void apu_isr_on_raised_thread(void)
++{
++    uint32_t kint, routine, context;
++    uint32_t s_eax, s_ecx, s_edx, s_ebx, s_esi, s_edi, s_esp, s_ebp, s_seh;
++    apu_guest_fn fn;
++
++    if (!InterlockedCompareExchange(&s_irq_line, 0, 0))
++        return;
++    if (InterlockedCompareExchange(&s_isr_busy, 1, 0) != 0)
++        return;
++    kint = xbox_GetConnectedInterrupt(APU_VECTOR);
++    routine = kint ? *(uint32_t *)(g_apu_ram_ptr + kint + 0) : 0;
++    context = kint ? *(uint32_t *)(g_apu_ram_ptr + kint + 4) : 0;
++    fn = routine ? recomp_lookup(routine) : NULL;
++    if (!fn) {
++        InterlockedExchange(&s_isr_busy, 0);
++        return;
++    }
++
++    s_eax = g_eax; s_ecx = g_ecx; s_edx = g_edx; s_ebx = g_ebx;
++    s_esi = g_esi; s_edi = g_edi; s_esp = g_esp; s_ebp = g_ebp;
++    s_seh = g_seh_ebp;
++    g_esp -= 4; *(uint32_t *)(g_apu_ram_ptr + g_esp) = context;
++    g_esp -= 4; *(uint32_t *)(g_apu_ram_ptr + g_esp) = kint;
++    g_esp -= 4; *(uint32_t *)(g_apu_ram_ptr + g_esp) = 0xDEADBEEFu;
++    { int _irql = xbox_IrqlEnterInterrupt(16); fn(); xbox_IrqlLeaveInterrupt(_irql); }
++    g_eax = s_eax; g_ecx = s_ecx; g_edx = s_edx; g_ebx = s_ebx;
++    g_esi = s_esi; g_edi = s_edi; g_esp = s_esp; g_ebp = s_ebp;
++    g_seh_ebp = s_seh;
++    InterlockedExchange(&s_isr_busy, 0);
++
++    {
++        static volatile LONG n;
++        LONG k = InterlockedIncrement(&n);
++        if (k <= 3 || (k & (k - 1)) == 0) {
++            fprintf(stderr, "[APU] interrupt taken on a raised thread polling the"
++                            " clock (%ld so far)\n", (long)k);
++            fflush(stderr);
++        }
++    }
++}
++
+ /* ============================================================
+  * MMIO Read / Write
+  * ============================================================ */
+@@ -1358,6 +1436,7 @@ MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr)
+     /* Start background frame thread */
+     qemu_thread_create(&d->apu_thread, "mcpx.apu_thread",
+                        mcpx_apu_frame_thread, d, QEMU_THREAD_JOINABLE);
++    xbox_irql_poll_hook = apu_isr_on_raised_thread;
+     mcpx_apu_wait_for_idle(d);
+     qemu_mutex_unlock(&d->lock);
+ 
+@@ -1374,6 +1453,7 @@ void mcpx_apu_shutdown(MCPXAPUState *d)
+     if (!d) return;
+ 
+     fprintf(stderr, "[APU] Shutting down MCPX APU...\n");
++    xbox_irql_poll_hook = NULL;
+ 
+     qemu_mutex_lock(&d->lock);
+     mcpx_apu_wait_for_idle(d);
+diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
+index 9314abd..f0e536f 100644
+--- a/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -1890,10 +1890,18 @@ static void bridge_RtlLeaveCriticalSection(void)
+     g_eax = 0;
+ }
+ 
++/* A thread polling the clock at raised IRQL takes pending device interrupts
++ * here (kernel_hal.c, xbox_IrqlPollPoint). Before the clock is read, so the
++ * time the caller sees includes the ISR's run. */
++extern void xbox_IrqlPollPoint(void);
++
+ /* ── KeQueryPerformanceCounter / Frequency (ordinals 126, 127) ─ */
+ static void bridge_KeQueryPerformanceCounter(void)
+ {
+-    LARGE_INTEGER li = xbox_KeQueryPerformanceCounter();
++    LARGE_INTEGER li;
++
++    xbox_IrqlPollPoint();
++    li = xbox_KeQueryPerformanceCounter();
+     g_eax = (uint32_t)li.LowPart;
+     g_edx = (uint32_t)li.HighPart;
+ }
+@@ -1908,7 +1916,10 @@ static void bridge_KeQueryPerformanceFrequency(void)
+ /* ── KeQuerySystemTime (ordinal 128) ─────────────────────── */
+ static void bridge_KeQuerySystemTime(void)
+ {
+-    uint32_t time_ptr = STACK_ARG(0);
++    uint32_t time_ptr;
++
++    xbox_IrqlPollPoint();
++    time_ptr = STACK_ARG(0);
+     xbox_KeQuerySystemTime(XBOX_TO_NATIVE(time_ptr));
+     g_eax = 0;
+ }
+diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
+index 0306f92..97b6a49 100644
+--- a/src/kernel/kernel_hal.c
++++ b/src/kernel/kernel_hal.c
+@@ -365,6 +365,38 @@ void xbox_IrqlLeaveInterrupt(int saved)
+         t_in_isr--;
+ }
+ 
++/* Interrupts taken by a thread that busy-waits at raised IRQL.
++ *
++ * Device models hold their interrupts off while any thread is at or above
++ * DISPATCH_LEVEL (xbox_IrqlBlocksInterrupts): on the Xbox's one CPU such a
++ * thread is not running alongside the ISR. But a device IRQL is above
++ * DISPATCH_LEVEL, so on the console the ISR still preempts that thread -- and
++ * XDK code relies on it: DirectSound, called by XACT inside XACT's own raise,
++ * spins at DISPATCH_LEVEL for a voice to stop, and the flag it waits on is
++ * cleared by the APU's ISR. Held off here, every such wait ran into
++ * DirectSound's 0.5 s timeout (Amped 2: picture and sound froze for half a
++ * second in rides).
++ *
++ * A thread polling the clock is busy-waiting, which is a point where it has
++ * no half-edited state the ISR could see, so the clock bridges call this:
++ * when the thread is raised (and not inside an ISR itself), the hook a device
++ * model registered takes its pending interrupt on this thread, as the CPU
++ * would. DPCs the ISR queues stay queued -- the timer thread needs the
++ * dispatch lock this thread holds -- so they run once it lowers, as on the
++ * console. */
++void (*volatile xbox_irql_poll_hook)(void);
++
++void xbox_IrqlPollPoint(void)
++{
++    void (*hook)(void);
++
++    if (g_current_irql < DISPATCH_LEVEL || t_in_isr)
++        return;
++    hook = xbox_irql_poll_hook;
++    if (hook)
++        hook();
++}
++
+ /*
+  * KfRaiseIrql - Raises IRQL to the specified level.
+  * Returns the previous IRQL. Uses __fastcall (ECX = NewIrql).

@@ -34,6 +34,10 @@
       raced the APU frame thread and could clobber a latched idle-voice trap, PIO SYNCHRONIZE was unhandled – fixed
       in runtime patch 0001 (see notes 2026-11-01/02) – the freeze is gone, but the music broke again late in the
       2026-11-02 play test (also without F10, no `[APU]` messages): not fixed yet
+- [ ] **Half-second audio stalls / ride pauses** (2026-11-02, `frame_limit = 72` run): DirectSound spins up to its
+      500 ms timeout for a voice to stop while the APU interrupt is held off by raised IRQL (see notes 2026-11-02).
+      Temporary diagnostic in runtime patch 0001 (`apu_holdoff_note` in apu_core.c, `xbox_IrqlDumpHoldersStack` in
+      kernel_hal.c, `[APU-HOLDOFF]` lines): **remove it once the hold-off is understood**, before the audio PR
 - [x] **Results-screen lag** (user report, 2026-10-21): DirectSound waited 0.5 s per stopped voice – the runtime
       always reported the same idle voice (v72) and never the one DirectSound retires the buffer through (v73);
       idle-voice traps are round-robin now (see notes 2026-10-21)

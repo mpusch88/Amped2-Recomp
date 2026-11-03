@@ -789,3 +789,48 @@ _(date – what was done, what was found, next step)_
     stderr – the log grew to 70 MB / 1.7 M lines. (4) The audio skip is likely a host stall (CPU starvation of the
     APU frame thread), not the fixed race. F10 itself stalls for one frame (`dump_surface` reads back and writes a
     14.5 MB BMP synchronously) and leaves nothing switched on.
+- 2026-11-02 – **Audio diagnostic run at `frame_limit = 72` (user, ~8 min, `logs/audio-72.log`).** Same build
+  (6fb1e26). `AMPED2_FRAME_LIMIT=72 RECOMP_APU_TRACE=1 RECOMP_APU_TRACE_NO_MMIO=1 RECOMP_APU_SSL_STATS=1
+  RECOMP_APU_IDLE_LOG=1`. No loud/distorted music this time (`[APU-BINS]` clamped=0 throughout); 72 fps held.
+  - The user felt two ~0.3 s pauses in rides ("loading delay"). Both are **audio stalls**: at t=195 s and t=254 s the
+    APU front end stayed trapped for 495 / 497 ms (`[AUDIO-HOST] trap spell`), ~465 ms of output starved (one XAudio2
+    underrun each), FPS 36.9 in the second one's 5 s window. Otherwise no starve, gap ≤ 21 ms.
+  - In each stall kernel ordinal 128 (KeQuerySystemTime) ran ~12.4 M times (0 → 12,436,305 → 24,888,020): a guest
+    busy-wait. NTSC-U DirectSound: `sub_00296778` spins `while (voice+0x12 & 0x8000) sub_00295B10(voice)`;
+    `sub_00295B10` force-stops the voice (`sub_00295A27`) once 0x4C4B40 (500 ms) have passed since `voice+0x78`. The
+    0x8000 "stop pending" bit is cleared by the idle-voice trap's service routine.
+  - DirectSound's lock `sub_0028E770` / `sub_0028E792` raises to DISPATCH_LEVEL only when below it (flag at +4), so
+    a call nested in an outer lock spins at DISPATCH_LEVEL. `apu_deliver_irq` holds the APU ISR off while any thread
+    is raised (`xbox_IrqlBlocksInterrupts`), so the trap cannot be serviced until the timeout. On the Xbox the APU ISR
+    preempts DISPATCH_LEVEL code. Before the race fix a forced delivery after 50 frames cut such waits short; the fix
+    removed it (it ran the ISR inside raised code). To confirm: which thread is raised during the spell.
+  - Temporary diagnostic (patch 0001; remove once understood, before the audio PR): `apu_holdoff_note`
+    (apu_core.c) prints `[APU-HOLDOFF]` when the APU interrupt has been held off by raised IRQL for more than 50 ms
+    (once per spell, at most 40) and the spell's length when it ends; `xbox_IrqlDumpHoldersStack` (kernel_hal.c)
+    adds the holder list with the code-looking dwords of each holder's guest stack around its raise point. Built
+    (native Windows, build-win); the patch series check passes.
+- 2026-11-02 – **Hold-off diagnostic run (`logs/audio-72b.log`, 72 fps, user).** The user paused right after the
+  glitch: **picture and sound freeze together** for a moment. Two `[APU-HOLDOFF]` reports:
+  - 58.5 ms, a thread raised in D3D code (stack 0x003220D6, 0x0032C378 …) – short, no starve.
+  - **494.9 ms**, thread 12976, stack in XACTENG (0x00310FB7, 0x00317C14, 0x003182FD, 0x00317B7B, 0x00317ABA,
+    0x0031524E, 0x00314E0D) and DSOUND 0x0028F72A; ended with the 495 ms trap spell and a 471 ms starve. XACT raises
+    to DISPATCH_LEVEL itself (`sub_003182DA`, KfRaiseIrql/KfLowerIrql thunks 0x336C30/0x336C34) and calls DirectSound
+    `0x0028F6BC` through a pointer, which reaches the stop-wait spin directly: 0028F6BC → 0029490C → 00294654 →
+    0029436F → 002940E1 → 00296C6D → 00296778. So the raised thread is the spinner itself.
+  - The 0x8000 "stop pending" bit is cleared by `sub_0029584B` (`flags &= 0x7FFF` via `sub_00295224`), reached
+    from the APU ISR `sub_00293B56` by direct calls (→ 00293A39 → 002939B8 → 002933B5 → 0029584B), not from the DPC
+    `sub_00293A12`. On the Xbox the ISR preempts the spinning DISPATCH_LEVEL thread and the wait ends within an APU
+    frame; here `apu_deliver_irq` never delivers while a thread is raised, so every XACT-initiated voice stop waits
+    the full 500 ms – the game thread (and with it the picture) and the APU front end (trapped, no audio) stall.
+  - **Fix to test: runtime patch 0005** (`patches/xboxrecomp/README.md`): a thread at raised IRQL that polls the clock
+    (KeQuerySystemTime / KeQueryPerformanceCounter bridges → `xbox_IrqlPollPoint`) takes the pending APU interrupt
+    itself, on its own guest stack at IRQL 16 (`apu_isr_on_raised_thread`), as the console's CPU would; the DPC it
+    queues waits for the thread to lower (dispatch lock). `s_isr_busy` serialises it with the frame thread's
+    delivery. Built (native Windows); series check passes. Expected: the 0.5 s stalls gone, `[APU] interrupt taken on
+    a raised thread` lines, no `[APU-HOLDOFF]` spell near 500 ms.
+- 2026-11-02 – **Patch 0005 test (`logs/audio-72c.log`, 72 fps, user, ~18 min): "seems to be working better".**
+  The interrupt was taken on a raised thread polling the clock 512+ times; no trap spell, no starve, no XAudio2
+  underrun in 1073 s (the two earlier runs had one 0.5 s stall per ~4 min). Left: three `[APU-HOLDOFF]` spells of
+  58-68 ms, all one thread in XPP/D3D code (0x0032F89C, 0x00332C69, 0x003220D6 …, the same as the 58 ms one before),
+  no starve. New: 66 seconds with clamped samples between 33 s and 411 s (~70 of 48000 per second, light clipping;
+  the earlier runs had 3) – not reported by ear; watch whether it is the music track or the fix.

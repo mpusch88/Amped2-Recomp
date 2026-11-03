@@ -1,5 +1,5 @@
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index 1f664a3..ac66b40 100644
+index 1f664a3..fdb8774 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
 @@ -168,7 +168,8 @@ static int apu_mmio_trace(void)
@@ -12,7 +12,48 @@ index 1f664a3..ac66b40 100644
      return on;
  }
  
-@@ -241,16 +242,14 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -229,6 +230,40 @@ extern void xbox_IrqlLeaveInterrupt(int saved);
+ extern APU_TLS uint32_t g_eax, g_ecx, g_edx, g_esp, g_ebx, g_esi, g_edi;
+ extern APU_TLS uint32_t g_fs_base;
+ 
++/* TEMPORARY diagnostic (2026-11-02, Amped 2's half-second audio stalls;
++ * remove with xbox_IrqlDumpHoldersStack in kernel_hal.c once the hold-off is
++ * understood). An interrupt held off by a raised thread for more than 50 ms
++ * is reported once per spell -- who is raised, where -- and the spell's
++ * length when it ends. Frame thread only. */
++extern void xbox_IrqlDumpHoldersStack(void);
++
++static void apu_holdoff_note(int held)
++{
++    static int64_t start_us;
++    static int reported, reports;
++    int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
++
++    if (held) {
++        if (!start_us) {
++            start_us = now;
++            reported = 0;
++        } else if (!reported && now - start_us > 50000 && reports < 40) {
++            reported = 1;
++            reports++;
++            fprintf(stderr, "[APU-HOLDOFF] interrupt held off %.1f ms by raised IRQL\n",
++                    (now - start_us) / 1000.0);
++            xbox_IrqlDumpHoldersStack();
++        }
++        return;
++    }
++    if (start_us && reported) {
++        fprintf(stderr, "[APU-HOLDOFF] spell ended after %.1f ms\n",
++                (now - start_us) / 1000.0);
++        fflush(stderr);
++    }
++    start_us = 0;
++}
++
+ /* Call the connected service routine while the line is up, from the frame
+  * thread, the way the OHCI model delivers USB interrupts (ohci_call_isr):
+  * a worker stack for the call, a TIB of this thread's own, and a hold-off
+@@ -241,16 +276,19 @@ static void apu_deliver_irq(MCPXAPUState *d)
       * thread is a new OS thread and needs its own TIB. g_fs_base itself
       * cannot tell, as every thread starts at the main thread's TIB. */
      static APU_TLS int tib_ready;
@@ -21,16 +62,22 @@ index 1f664a3..ac66b40 100644
      apu_guest_fn fn;
      int slot;
  
-     if (!InterlockedCompareExchange(&s_irq_line, 0, 0))
+-    if (!InterlockedCompareExchange(&s_irq_line, 0, 0))
++    if (!InterlockedCompareExchange(&s_irq_line, 0, 0)) {
++        apu_holdoff_note(0);
          return;
 -    if (xbox_IrqlBlocksInterrupts() && ++held_off <= 50)
-+    if (xbox_IrqlBlocksInterrupts())
++    }
++    if (xbox_IrqlBlocksInterrupts()) {
++        apu_holdoff_note(1);
          return;
 -    held_off = 0;
++    }
++    apu_holdoff_note(0);
      kint = xbox_GetConnectedInterrupt(APU_VECTOR);
      if (!kint)
          return;
-@@ -337,9 +336,15 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
+@@ -337,9 +375,15 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
           * the title writes (0, so far, always) becomes the new start. */
          qatomic_set(&d->regs[addr], (uint32_t)val);
          d->sample_count = val;
@@ -46,7 +93,7 @@ index 1f664a3..ac66b40 100644
          update_irq(d);
          qemu_cond_broadcast(&d->cond);
          break;
-@@ -1128,7 +1133,7 @@ static void *mcpx_apu_frame_thread(void *arg)
+@@ -1128,7 +1172,7 @@ static void *mcpx_apu_frame_thread(void *arg)
           * reposting front-end commands -- is what lets the rest of
           * DirectSound initialisation finish. Without the tick the title
           * re-runs the sequencer setup forever and never gets past audio. */
@@ -55,7 +102,7 @@ index 1f664a3..ac66b40 100644
              uint32_t sectl = qatomic_read(&d->regs[NV_PAPU_SECTL]);
              uint32_t ssl = qatomic_read(&d->regs[NV_PAPU_SSL]);
              d->sample_count += NUM_SAMPLES_PER_FRAME;
-@@ -1137,9 +1142,32 @@ static void *mcpx_apu_frame_thread(void *arg)
+@@ -1137,9 +1181,32 @@ static void *mcpx_apu_frame_thread(void *arg)
                      && (sectl & NV_PAPU_SECTL_XCNTMODE)
                             != NV_PAPU_SECTL_XCNTMODE_OFF) {
                  d->sample_count -= ssl;
@@ -796,7 +843,7 @@ index 965dd08..450fcfb 100644
          kernel_drain_dpcs();   /* deferred work, before due timers */
          now = (long long)GetTickCount64();
 diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
-index 3a09ca8..15ae119 100644
+index 3a09ca8..7889ad1 100644
 --- a/src/kernel/kernel_hal.c
 +++ b/src/kernel/kernel_hal.c
 @@ -93,6 +93,92 @@ int xbox_IrqlRaisedCount(void)
@@ -892,7 +939,44 @@ index 3a09ca8..15ae119 100644
  static int  s_trace = -1;
  static volatile LONG s_traced = 0;
  
-@@ -177,6 +263,10 @@ static void irql_track(KIRQL old_level, KIRQL new_level, void *ra)
+@@ -168,6 +254,36 @@ void xbox_IrqlDumpHolders(void)
+     fflush(stderr);
+ }
+ 
++/* TEMPORARY diagnostic (2026-11-02, Amped 2's half-second audio stalls; remove
++ * with apu_holdoff_note in apu_core.c once the hold-off is understood). The
++ * holder list, plus per holder the code-looking dwords on its guest stack
++ * around the point where it raised: the raise itself always returns into the
++ * title's lock helper, the callers above it say which code holds the level.
++ * The holder is still inside that code, so its frames are live; the window is
++ * kept small so it stays inside the stack. */
++void xbox_IrqlDumpHoldersStack(void)
++{
++    int i, k;
++
++    xbox_IrqlDumpHolders();
++    for (i = 0; i < IRQL_HOLDERS; i++) {
++        LONG t = InterlockedCompareExchange(&s_holders[i].tid, 0, 0);
++        uint32_t esp = s_holders[i].guest_esp;
++
++        if (!t || esp < 0x1000 || esp > 0x07FFF000)
++            continue;
++        fprintf(stderr, "  [IRQLHOLD]   tid %lu stack:", (unsigned long)t);
++        for (k = -32; k < 48; k++) {
++            uint32_t v = *(volatile uint32_t *)((uintptr_t)g_xbox_mem_offset
++                                                + esp + 4 * k);
++            if (v >= 0x00011000 && v < 0x00380000)
++                fprintf(stderr, " %+d:%08X", 4 * k, v);
++        }
++        fputc('\n', stderr);
++    }
++    fflush(stderr);
++}
++
+ static void irql_track(KIRQL old_level, KIRQL new_level, void *ra)
+ {
+     int was = (old_level >= DISPATCH_LEVEL);
+@@ -177,6 +293,10 @@ static void irql_track(KIRQL old_level, KIRQL new_level, void *ra)
      if (now == was)
          return;
  
@@ -903,7 +987,7 @@ index 3a09ca8..15ae119 100644
      d = now ? InterlockedIncrement(&g_irql_raised_count)
              : InterlockedDecrement(&g_irql_raised_count);
      InterlockedIncrement(&s_transitions);
-@@ -213,21 +303,36 @@ static void irql_track(KIRQL old_level, KIRQL new_level, void *ra)
+@@ -213,21 +333,36 @@ static void irql_track(KIRQL old_level, KIRQL new_level, void *ra)
  int xbox_IrqlEnterInterrupt(int level)
  {
      int saved = (int)g_current_irql;
