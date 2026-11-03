@@ -869,3 +869,7 @@ _(date – what was done, what was found, next step)_
   from the native `build-win/` when there is no MinGW cross compiler (Git Bash), and zips with Python when `zip` is
   missing. First one: `dev-20261103`, NTSC-U, Windows only (docker not running here, so no Linux package); the exe
   imports only system DLLs (UCRT, XINPUT1_4, XAudio2_8, d3d11, MF, D3DCompiler_47).
+  - Package tested the player's way (unpacked zip, `run.bat`, `game_dir` from settings.ini): boot, menus at 144 fps,
+    a ride (107-144 fps), clean exit. Published the same day; then, by the owner's choice, turned into a regular
+    release marked Latest (a pre-release never shows in the repo sidebar, and a fork does not inherit upstream's
+    releases). From now on every `dev/all` push gets such a release (docs/RELEASING.md, "Dev releases").
