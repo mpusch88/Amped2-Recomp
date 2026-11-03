@@ -1,5 +1,11 @@
 # Amped2-Recomp
 
+> **This is a Windows-focused fork** of [bertibertig/Amped2-Recomp](https://github.com/bertibertig/Amped2-Recomp).
+> The `dev/all` branch has all the work that isn't merged upstream yet (NTSC-U disc, Windows with Vulkan, native
+> HD widescreen, audio fixes). It's built and tested on Windows 10/11, and the
+> [releases](https://github.com/mpusch88/Amped2-Recomp/releases) here are Windows packages only. For Linux and
+> Steam Deck, use the upstream project.
+
 [![CI](https://github.com/bertibertig/Amped2-Recomp/actions/workflows/ci.yml/badge.svg)](https://github.com/bertibertig/Amped2-Recomp/actions/workflows/ci.yml)
 
 Experimental **static recompilation of Amped 2 (original Xbox, 2003)** into a native x86-64 PC program,
