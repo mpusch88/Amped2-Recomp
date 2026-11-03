@@ -105,6 +105,8 @@ releases), tagged `dev-<yyyymmdd>` (a second one on the same day: `dev-<yyyymmdd
 `docs/release-notes/dev-<yyyymmdd>.md`
 (up front: the fork is Windows-focused, Windows package only; what is new against upstream's last release, the
 disc of the package, what was tested), a work-log entry.
+`dev/all` is the fork's default branch: the PR branches plus one fork-only README commit on top (kept out of
+PRs, rebased onto the new top each time).
 On Windows (Git Bash), without docker or MinGW cross tools, package only Windows from the native `build-win/`:
 
 ```bash
