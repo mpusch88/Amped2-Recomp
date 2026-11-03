@@ -24,6 +24,9 @@
       `config/<build>/`), chosen by the XBE's SHA-1; the program refuses the other version's default.xbe
 - [ ] PAL equivalents of the NTSC-U-only work (attract-mode launch routine, the camera aspect hook for native HD)
 - [ ] PAL build timestamp in `src/version/pal/amped2_addrs.h` is taken from docs/notes.md, not checked against a PAL XBE
+- [ ] Test the current code with the PAL disc: everything since NTSC-U support (Windows/Vulkan, widescreen, 4x
+      rendering, audio fixes 0005, present-wait pacing) was only played on NTSC-U. Needs a PAL XBE and a pipeline run
+      for it (one build per disc)
 - [x] NV2A video overlay (movies) in the runtime + SDL window
 - [x] Movies play at full speed (DPC latency fixed in the runtime)
 - [x] **Music bug** (user report, 2026-10-20): music stopped, came back quiet/crackling, no next track, static, crash –
