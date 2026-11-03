@@ -768,28 +768,28 @@ _(date – what was done, what was found, next step)_
   upstreamed on its own. 0001 now carries the corrected code; 0002-0004 each apply to upstream + 0001 on their own
   again. The resulting runtime sources are byte-identical to 0001+0005 (checked). SSX3-Recomp shares 0001 and gets
   the fixes with it.
-- 2026-11-02 – **User play test of `fix/apu-isr-race` (6fb1e26), Windows, ~85 min.** Settings: 2x, 21:9 native HD,
+- 2026-11-02 - **User play test of `fix/apu-isr-race` (6fb1e26), Windows, ~85 min.** Settings: 2x, 21:9 native HD,
   unlocked frame rate with no limit (`frame_limit 0`, so FIFO vsync at 144 Hz paces), borderless. Log
   `logs/user-test3.log`, F10 captures `logs/capture/test_658863/706752/708716` (end of a ride, results screen with
-  the coin, end-of-run menu – all three pictures correct, full width).
+  the coin, end-of-run menu - all three pictures correct, full width).
   - Works: boarder create/load/delete (no duplicates), menus with bars, challenge cards and rides full width,
     coins. Audio "mostly OK" for most of the session (one short skip, see below), but **it broke again quickly
-    near the end, also without F10** – the audio problem is not fixed. No `[APU]`/IRQL
+    near the end, also without F10** - the audio problem is not fixed. No `[APU]`/IRQL
     warnings, no crash.
   - Problem: **general lag/jerkiness while playing**, "the background moving forward one tick at a time, almost
     quantized"; once a strong slowdown at the end of a run; once the audio skipped. The 5 s averages do not show it:
-    rides 110–135 fps (draws ~900–1050), menus 143–145 (vsync cap), two dips (61.8 at a ride's start, 67–72 at
+    rides 110-135 fps (draws ~900-1050), menus 143-145 (vsync cap), two dips (61.8 at a ride's start, 67-72 at
     loads). So it is frame pacing, not throughput.
-  - Leads, in order: (1) rides render at 110–135 fps under a 144 Hz FIFO vsync, so frames alternate between one
-    and two refreshes (6.9 / 13.9 ms) – classic judder; check with `frame_limit` 72/60 or `framerate original`.
+  - Leads, in order: (1) rides render at 110-135 fps under a 144 Hz FIFO vsync, so frames alternate between one
+    and two refreshes (6.9 / 13.9 ms) - classic judder; check with `frame_limit` 72/60 or `framerate original`.
     (2) How the game advances time per flip (fixed step per flip/vblank vs. measured time): with a fixed step,
     uneven flip intervals become uneven motion, and steps that the game derives from the vblank count could be
-    "quantized". (3) CPU spikes on the NV2A thread: texture hashing reads ~5 GB per 5 s in rides (~70–100k
+    "quantized". (3) CPU spikes on the NV2A thread: texture hashing reads ~5 GB per 5 s in rides (~70-100k
     textures hashed), and ~330 log lines/s (`[GPU] draw #` every 200 draws, `[NV2A] DMA_PUT`) go to unbuffered
-    stderr – the log grew to 70 MB / 1.7 M lines. (4) The audio skip is likely a host stall (CPU starvation of the
+    stderr - the log grew to 70 MB / 1.7 M lines. (4) The audio skip is likely a host stall (CPU starvation of the
     APU frame thread), not the fixed race. F10 itself stalls for one frame (`dump_surface` reads back and writes a
     14.5 MB BMP synchronously) and leaves nothing switched on.
-- 2026-11-02 – **Audio diagnostic run at `frame_limit = 72` (user, ~8 min, `logs/audio-72.log`).** Same build
+- 2026-11-02 - **Audio diagnostic run at `frame_limit = 72` (user, ~8 min, `logs/audio-72.log`).** Same build
   (6fb1e26). `AMPED2_FRAME_LIMIT=72 RECOMP_APU_TRACE=1 RECOMP_APU_TRACE_NO_MMIO=1 RECOMP_APU_SSL_STATS=1
   RECOMP_APU_IDLE_LOG=1`. No loud/distorted music this time (`[APU-BINS]` clamped=0 throughout); 72 fps held.
   - The user felt two ~0.3 s pauses in rides ("loading delay"). Both are **audio stalls**: at t=195 s and t=254 s the
@@ -809,9 +809,9 @@ _(date – what was done, what was found, next step)_
     (once per spell, at most 40) and the spell's length when it ends; `xbox_IrqlDumpHoldersStack` (kernel_hal.c)
     adds the holder list with the code-looking dwords of each holder's guest stack around its raise point. Built
     (native Windows, build-win); the patch series check passes.
-- 2026-11-02 – **Hold-off diagnostic run (`logs/audio-72b.log`, 72 fps, user).** The user paused right after the
+- 2026-11-02 - **Hold-off diagnostic run (`logs/audio-72b.log`, 72 fps, user).** The user paused right after the
   glitch: **picture and sound freeze together** for a moment. Two `[APU-HOLDOFF]` reports:
-  - 58.5 ms, a thread raised in D3D code (stack 0x003220D6, 0x0032C378 …) – short, no starve.
+  - 58.5 ms, a thread raised in D3D code (stack 0x003220D6, 0x0032C378 …) - short, no starve.
   - **494.9 ms**, thread 12976, stack in XACTENG (0x00310FB7, 0x00317C14, 0x003182FD, 0x00317B7B, 0x00317ABA,
     0x0031524E, 0x00314E0D) and DSOUND 0x0028F72A; ended with the 495 ms trap spell and a 471 ms starve. XACT raises
     to DISPATCH_LEVEL itself (`sub_003182DA`, KfRaiseIrql/KfLowerIrql thunks 0x336C30/0x336C34) and calls DirectSound
@@ -821,20 +821,20 @@ _(date – what was done, what was found, next step)_
     from the APU ISR `sub_00293B56` by direct calls (→ 00293A39 → 002939B8 → 002933B5 → 0029584B), not from the DPC
     `sub_00293A12`. On the Xbox the ISR preempts the spinning DISPATCH_LEVEL thread and the wait ends within an APU
     frame; here `apu_deliver_irq` never delivers while a thread is raised, so every XACT-initiated voice stop waits
-    the full 500 ms – the game thread (and with it the picture) and the APU front end (trapped, no audio) stall.
+    the full 500 ms - the game thread (and with it the picture) and the APU front end (trapped, no audio) stall.
   - **Fix to test: runtime patch 0005** (`patches/xboxrecomp/README.md`): a thread at raised IRQL that polls the clock
     (KeQuerySystemTime / KeQueryPerformanceCounter bridges → `xbox_IrqlPollPoint`) takes the pending APU interrupt
     itself, on its own guest stack at IRQL 16 (`apu_isr_on_raised_thread`), as the console's CPU would; the DPC it
     queues waits for the thread to lower (dispatch lock). `s_isr_busy` serialises it with the frame thread's
     delivery. Built (native Windows); series check passes. Expected: the 0.5 s stalls gone, `[APU] interrupt taken on
     a raised thread` lines, no `[APU-HOLDOFF]` spell near 500 ms.
-- 2026-11-02 – **Patch 0005 test (`logs/audio-72c.log`, 72 fps, user, ~18 min): "seems to be working better".**
+- 2026-11-02 - **Patch 0005 test (`logs/audio-72c.log`, 72 fps, user, ~18 min): "seems to be working better".**
   The interrupt was taken on a raised thread polling the clock 512+ times; no trap spell, no starve, no XAudio2
   underrun in 1073 s (the two earlier runs had one 0.5 s stall per ~4 min). Left: three `[APU-HOLDOFF]` spells of
   58-68 ms, all one thread in XPP/D3D code (0x0032F89C, 0x00332C69, 0x003220D6 …, the same as the 58 ms one before),
   no starve. New: 66 seconds with clamped samples between 33 s and 411 s (~70 of 48000 per second, light clipping;
-  the earlier runs had 3) – not reported by ear; watch whether it is the music track or the fix.
-- 2026-11-02 – **Frame-time logging for the ride judder (Vulkan back end).** The existing logs only have 5 s
+  the earlier runs had 3) - not reported by ear; watch whether it is the music track or the fix.
+- 2026-11-02 - **Frame-time logging for the ride judder (Vulkan back end).** The existing logs only have 5 s
   averages (`[VK] FPS`, `[PERF]`), which hide uneven frames. Now per real flip: interval between presents, swapchain
   image wait (FIFO back pressure), `frame_pace` sleep, present call, and the game's own step for the frame. Log line
   every 5 s: `[VK] frame ms/5s: p50 p95 p99 max | >1.5x p50: n of N | game step p5 p50 p95 max`;
@@ -845,25 +845,25 @@ _(date – what was done, what was found, next step)_
     frame time not located → 0). `AMPED2_TIME_TRACE` read the PAL address 0x3AD0C4 on every build; it uses
     `AMPED2_GAME_CLOCK30` now.
   - User run 2026-11-03 (unlocked, frame limit = display, 144 Hz FIFO, 3440x1440, `logs/ft-display.*`): menus
-    and rides presented 720 flips per 5 s, but in bursts � 7 flips ~5 ms apart, then one ~20 ms (p50 4-6 ms,
+    and rides presented 720 flips per 5 s, but in bursts - 7 flips ~5 ms apart, then one ~20 ms (p50 4-6 ms,
     p95 14-20 ms, 100-240 flips per 5 s over 1.5x p50). Acquire, `frame_pace` and present took ~0 ms: the title
     rendered ahead until the swapchain/frame slots were full and then blocked for a whole refresh elsewhere. That is
     the "jerky at 110-145 fps" judder.
   - The `0x3ACDC8` value is not the per-frame step at flip time (mostly 0, never near the interval); the CSV column
     stays but is not to be trusted. `AMPED2_GAME_CLOCK30` is: 29.98 ticks/s over 779 s.
-- 2026-11-03 � **Present wait: FIFO flips paced on the display.** With `VK_KHR_present_id` + `VK_KHR_present_wait`
+- 2026-11-03 - **Present wait: FIFO flips paced on the display.** With `VK_KHR_present_id` + `VK_KHR_present_wait`
   (optional, logged as `[VK] present wait: yes`), each real flip in FIFO mode waits until the previous flip is on
   screen (40 ms bound), so flips come one refresh apart with one frame queued. `AMPED2_VK_PRESENT_WAIT=0` turns it
   off. CSV gains `present_wait_ms` and `fence_ms` (frame-slot fence waits since the last flip).
   - User runs (`logs/ft-display-pw.*`, `logs/ft-pw2.*` 13 min with `RECOMP_AUDIO_WAV`): menus and light stretches a
-    steady 7.0 ms (0-5 flips per 5 s over 1.5x p50); heavy ride stretches 115-130 fps (p50 7.5-8.5, p95 ~11 ms) �
+    steady 7.0 ms (0-5 flips per 5 s over 1.5x p50); heavy ride stretches 115-130 fps (p50 7.5-8.5, p95 ~11 ms) -
     the title not finishing within a 144 Hz refresh, CPU time (texture hashing etc.), not pacing. Game clock 29.98
     ticks/s, i.e. real time ("felt fast" by the user in one run: not the clock).
   - Audio in the same runs: 0 starves, 0 underruns, gap_max <= 18.5 ms; the WAV has no silent gaps in the music
     (one 3 ms), clipping in 5 s of 789 (<= 68 samples), three click-like jumps (250 s, 341 s, 602 s). The user heard
-    "some dropouts" / glitches: not visible as silence in the mix � suspect the music stream (a voice skipping), next
+    "some dropouts" / glitches: not visible as silence in the mix - suspect the music stream (a voice skipping), next
     time with the time of the glitch.
-- 2026-11-03 � **Dev pre-releases of `dev/all` on the fork.** Upstream releases by hand (`package_release.sh`,
+- 2026-11-03 - **Dev pre-releases of `dev/all` on the fork.** Upstream releases by hand (`package_release.sh`,
   `docs/release-notes/<version>.md`, `gh release create`, tag on `main`); the fork does the same for `dev/all` as a
   pre-release `dev-<yyyymmdd>` (docs/RELEASING.md, "Dev pre-releases"). `package_release.sh` now packages Windows
   from the native `build-win/` when there is no MinGW cross compiler (Git Bash), and zips with Python when `zip` is

@@ -32,7 +32,7 @@
 - [ ] **Loud, distorted music and a freeze at high frame rates** (user report, 2026-11-01, with the 4x performance
       work): device ISRs ran without the dispatch lock (a DPC queued from the APU ISR skipped it), guest PIO writes
       raced the APU frame thread and could clobber a latched idle-voice trap, PIO SYNCHRONIZE was unhandled – fixed
-      in runtime patch 0001 (see notes 2026-11-01/02) – the freeze is gone, but the music broke again late in the
+      in runtime patch 0001 (see notes 2026-11-01/02) - the freeze is gone, but the music broke again late in the
       2026-11-02 play test (also without F10, no `[APU]` messages): not fixed yet
 - [ ] **Half-second audio stalls / ride pauses** (2026-11-02, `frame_limit = 72` run): DirectSound spins up to its
       500 ms timeout for a voice to stop while the APU interrupt is held off by raised IRQL (see notes 2026-11-02).
@@ -124,7 +124,7 @@ First batch (done 2026-10-20, `amped2_recomp --settings` / `scripts/run.sh --set
 - [x] Aspect ratio: 4:3, 16:9, 16:10, 21:9 – Hor+ in rides, HUD kept 4:3 in the middle, menus and movies 4:3
 - [x] Framerate: real unlock (the game runs on QueryPerformanceCounter time), limit = display refresh / fixed / none
 - [x] Window mode: windowed, fullscreen, borderless fullscreen + display selection, Alt+Enter / F11 in game
-- [ ] **Frame pacing / jerky motion in rides** (user test 2026-11-02, notes): averages are 110–135 fps, but motion
+- [ ] **Frame pacing / jerky motion in rides** (user test 2026-11-02, notes): averages are 110-135 fps, but motion
       looks uneven ("quantized"), with occasional slowdowns and an audio skip. Leads: 144 Hz FIFO vsync with frames
       below the refresh, the game's time step per flip, CPU spikes (texture hashing ~1 GB/s, ~330 log lines/s)
 - [ ] Frame rate (2026-10-31, 21:9, RTX 4070 SUPER, `AMPED2_VK_PERF`): at 2x rides reach the 144 Hz cap; the CPU

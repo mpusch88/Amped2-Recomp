@@ -192,14 +192,14 @@ Verified: Linux build + Windows cross build (MinGW) compile; own decoder test (8
 - Off by default, so titles stay in their SD mode. Amped 2 sets it when its native HD widescreen is on.
   Generic: any title offering 480p/720p.
 
-## 0005 – The APU interrupt taken by a raised thread that polls the clock
+## 0005 - The APU interrupt taken by a raised thread that polls the clock
 - Applies on top of 0001 (apu_core.c, kernel_hal.c) and 0004 (kernel_hal.c).
 - `src/kernel/kernel_hal.c`: `xbox_IrqlPollPoint` and the hook `xbox_irql_poll_hook`. Device models hold their
   interrupts off while any thread is at DISPATCH_LEVEL or above; on the console a device ISR still preempts such a
   thread. When a thread at raised IRQL (not inside an ISR) calls the poll point, the registered hook may take its
   device's pending interrupt on that thread.
 - `src/kernel/kernel_bridge.c`: `KeQuerySystemTime` and `KeQueryPerformanceCounter` call the poll point before
-  reading the clock – a thread polling the clock is busy-waiting, with no half-edited state.
+  reading the clock - a thread polling the clock is busy-waiting, with no half-edited state.
 - `src/apu/apu_core.c`: `apu_isr_on_raised_thread` (the hook): runs DirectSound's APU service routine on the calling
   thread's guest stack at IRQL 16 and restores the caller's guest registers; the thread already holds the dispatch
   lock, so the DPC the routine queues runs once it lowers, as on the console. `s_isr_busy` keeps it and the frame
@@ -207,4 +207,4 @@ Verified: Linux build + Windows cross build (MinGW) compile; own decoder test (8
   after taking the flag. Logs `[APU] interrupt taken on a raised thread` (first 3, then at powers of two).
 - Why: XACT calls DirectSound inside its own raise; DirectSound spins there (Amped 2 NTSC-U `sub_00296778`) until the
   APU ISR clears a voice's stop-pending flag, and with the interrupt held off every such stop waited for its 0.5 s
-  timeout – picture and sound froze for half a second in rides (docs/notes.md 2026-11-02). Generic (XDK DirectSound).
+  timeout - picture and sound froze for half a second in rides (docs/notes.md 2026-11-02). Generic (XDK DirectSound).
